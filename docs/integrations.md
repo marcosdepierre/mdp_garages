@@ -396,13 +396,16 @@ mdp_garages solo deja guardar o aparcar vehículos **marcados por el servidor** 
 -- shared/config.lua
 Config.TrustedResources = { 'qbx_vehicleshop', 'qb-vehicleshop', 'esx_vehicleshop' }
 ```
-⚠️ En el código actual (`server/garages.lua:528-570`), `SpawnOwnedVehicle` solo exige que la llamada venga de otro recurso (si no, devuelve `invalid_source`). La comprobación de `TrustedResources` está anunciada por Backend, pero **aún no está en el código**.
+Si el recurso que llama no está en la lista, los dos exports devuelven `untrusted_resource` (`server/garages.lua:589` y `:642`, commit 677f577).
 
 **`AddVehicle`**: `exports.mdp_garages:AddVehicle(owner, plate, model, props?, garageId?) -> ok, err?` (`server/vehicles.lua:245-308`)
 - `owner` = identificador del framework (citizenid en qb/qbx, `xPlayer.getIdentifier()` en ESX).
 - `garageId = 'out'` crea la fila en OUT (necesario para las vías 1, 2 y 3); otro valor la crea en GARAGED en ese garaje; `nil`, en el garaje por defecto.
 - La fila se crea con `managed_at` NULL, así que es adoptable. Las filas que llegan por import desde las tablas del framework se crean con `managed_at` ya fijado y **nunca son adoptables**.
-- Errores: `invalid_owner`, `invalid_plate`, `invalid_model`, `invalid_props`, `plate_exists`, `db_error`.
+- Retorno en éxito: `true` o `true, 'exists' | 'transferred' | 'restored'` (`server/vehicles.lua:310-365`). **Ya no existe `plate_exists`**: si la fila ya existe con el mismo dueño, devuelve `true, 'exists'`.
+- Errores: `invalid_owner`, `invalid_plate`, `invalid_model`, `invalid_props`, `db_error`, `transfer_failed`. `transfer_deferred` solo puede salir si otra operación cambió el estado de una fila REMOVED mientras se restauraba; es un caso de carrera, reintentable.
+- **Cambio de dueño (QC P1-OWN-H1):** si la matrícula ya existe con otro dueño, `AddVehicle` la transfiere **en el momento**, en cualquier estado vivo (`Vehicles.ApplyTransfer`). Al transferir se borran las llaves compartidas (`mdp_vehicle_keys`), se quitan las llaves externas al vendedor si está conectado y, si hay entidad, queda trackeada para el comprador. La sync del framework hace lo mismo cuando el dueño en `player_vehicles`/`owned_vehicles` es distinto.
+- **Import frente a `AddVehicle` (commit 677f577):** si `AddVehicle` ya creó la fila, el `INSERT IGNORE` del import no hace nada y `managed_at`/`source` no cambian. Solo puede cambiar el dueño, con la transferencia inmediata descrita arriba.
 
 **`SpawnOwnedVehicle`** (commit 53c2c56): `exports.mdp_garages:SpawnOwnedVehicle(plate, coords, src) -> netId | nil, err`
 - `coords`: `vector3`/`vector4` o `{x, y, z, w?}`.
@@ -412,8 +415,8 @@ Config.TrustedResources = { 'qbx_vehicleshop', 'qb-vehicleshop', 'esx_vehiclesho
 |---|---|
 | `invalid_plate` | matrícula vacía o no válida |
 | `invalid_coords` | coords no numéricas, infinitas o fuera del mapa |
-| `untrusted_resource` | el recurso que llama no está en `Config.TrustedResources` (⚠️ pendiente en el código, ver arriba) |
-| `invalid_source` | `src` no está conectado o no tiene identificador, o la llamada no viene de otro recurso |
+| `untrusted_resource` | el recurso que llama no está en `Config.TrustedResources` (o es mdp) |
+| `invalid_source` | `src` no está conectado o no tiene identificador |
 | `rate_limited` | más de 3 llamadas en 10 s por jugador |
 | `not_ready` | mdp todavía arrancando |
 | `not_owned_vehicle` | no hay fila en `mdp_vehicles` (o está en REMOVED) |
@@ -442,7 +445,7 @@ Config.TrustedResources = { 'qbx_vehicleshop', 'qb-vehicleshop', 'esx_vehiclesho
 | `not_owned_vehicle` | no hay fila (o está en REMOVED) |
 | `invalid_state` | la fila no está en OUT |
 | `vehicle_mismatch` | ya gestionado, fuera de la ventana de 60 s, ya marcado o trackeado, matrícula duplicada o distinta, modelo distinto o entidad que no es de script |
-| `rate_limited` | ⚠️ pendiente: Backend está añadiendo un límite por recurso; todavía no está en el código |
+| `rate_limited` | más de 10 llamadas en 60 s por recurso |
 | `locked` | matrícula bloqueada |
 
 **Adopción en el primer guardado** (fallback para concesionarios **sin modificar**). Clave: `Config.AllowFirstStoreAdoption = true` (por defecto; alias heredado `Config.AdoptUnmarkedOnFirstStore`). El resto de mitigaciones están fijas en el código (`server/garages.lua:232-300`, `server/vehicles.lua:90-140`, commit 7ad284c).
@@ -459,7 +462,7 @@ Condiciones al guardar:
 
 ⚠️ **Caveat:** el concesionario tiene que hacer el spawn del coche **antes de la siguiente sync** de ese jugador (al cargar o al abrir el garaje, con caché de 60 s). Si la sync importa la fila y no hay ninguna entidad con esa matrícula, R4-1 la pasa a GARAGED y ya no se puede adoptar (el jugador la saca desde el garaje con normalidad).
 
-⚠️ **Pendiente de confirmación (Backend):** posible conflicto entre el `INSERT IGNORE` del import y una fila creada antes con `AddVehicle` para la misma matrícula (qué fila gana y su `managed_at`).
+Import frente a `AddVehicle`: si la fila ya la creó `AddVehicle`, la sync no toca su `managed_at` ni su `source`. Sigue siendo adoptable si lo era; solo puede cambiar el dueño (transferencia inmediata).
 
 ### 1) Recomendado: `AddVehicle` + `SpawnOwnedVehicle`
 El concesionario mantiene su INSERT en la tabla del framework y, además, llama a `AddVehicle(owner, plate, model, nil, 'out')` y **sustituye su spawn** por `SpawnOwnedVehicle`. Las llaves, las props y el combustible los pone mdp.
@@ -475,12 +478,12 @@ Config.TrustedResources = { 'qbx_vehicleshop', 'qb-vehicleshop', 'esx_vehiclesho
 ```lua
 -- en el concesionario, justo después de su INSERT y de SU spawn (antes de 60 s desde AddVehicle):
 local okA, errA = exports.mdp_garages:AddVehicle(citizenid, plate, model, nil, 'out')
-if not okA and errA ~= 'plate_exists' then print(('[shop] mdp AddVehicle %s: %s'):format(plate, errA)) end
+if not okA then print(('[shop] mdp AddVehicle %s: %s'):format(plate, errA)) return end
 -- ... spawn propio del concesionario (CreateVehicleServerSetter / qbx.spawnVehicle) -> netId ...
 local ok, err = exports.mdp_garages:RegisterExternalVehicle(netId, plate)
 if not ok then print(('[shop] mdp RegisterExternalVehicle %s: %s'):format(plate, err)) end
 ```
-Si `errA == 'plate_exists'` porque la fila ya era antigua, la ventana de 60 s no se cumple y el resultado será `vehicle_mismatch`.
+Si la fila ya existía (`true, 'exists'` o `'transferred'`) y tiene más de 60 s, o ya fue gestionada, `RegisterExternalVehicle` devolverá `vehicle_mismatch`.
 
 ### 3) Último recurso: adopción en el primer guardado
 Sirve para concesionarios **sin modificar** (solo escriben en la tabla del framework y hacen el spawn ellos mismos), o para los que llaman a `AddVehicle(owner, plate, model, nil, 'out')`. El dueño guarda el coche conduciéndolo en menos de 30 min. Hay que tener en cuenta el caveat de la sync.
@@ -503,9 +506,7 @@ function SpawnVehicle(src, data)
     local citizenid = newVehicle.citizenid or exports.qbx_core:GetPlayer(src).PlayerData.citizenid
 
     local ok, err = exports.mdp_garages:AddVehicle(citizenid, plate, newVehicle.modelName, nil, 'out')
-    if not ok and err ~= 'plate_exists' then
-        lib.print.error(('mdp AddVehicle %s: %s'):format(plate, err)) return
-    end
+    if not ok then lib.print.error(('mdp AddVehicle %s: %s'):format(plate, err)) return end
     local netId, spawnErr = exports.mdp_garages:SpawnOwnedVehicle(plate, coords, src) -- keys/props/fuel by mdp
     if not netId then lib.print.error(('mdp SpawnOwnedVehicle %s: %s'):format(plate, spawnErr)) return end
 
@@ -553,7 +554,7 @@ end
 
 local function mdpDeliver(src, citizenid, vehicle, plate, shopCfg)
     local ok, err = exports.mdp_garages:AddVehicle(citizenid, plate, vehicle, nil, 'out')
-    if not ok and err ~= 'plate_exists' then print(('[qb-vehicleshop] mdp AddVehicle %s: %s'):format(plate, err)) return end
+    if not ok then print(('[qb-vehicleshop] mdp AddVehicle %s: %s'):format(plate, err)) return end
     local netId, e = exports.mdp_garages:SpawnOwnedVehicle(plate, shopCfg['VehicleSpawn'], src)
     if not netId then print(('[qb-vehicleshop] mdp SpawnOwnedVehicle %s: %s'):format(plate, e)) return end
     TaskWarpPedIntoVehicle(GetPlayerPed(src), NetworkGetEntityFromNetworkId(netId), -1)
@@ -579,7 +580,7 @@ Fuente: https://github.com/esx-framework/ESX-Legacy-Addons/tree/main/%5Besx_addo
 Requisito: `Config.TrustedResources = { 'esx_vehicleshop' }` en mdp. Sustitución del bloque `ESX.OneSync.SpawnVehicle(...)` (l.396-403):
 ```lua
 local okA, errA = exports.mdp_garages:AddVehicle(xPlayer.getIdentifier(), plate, model, nil, 'out')
-if okA or errA == 'plate_exists' then
+if okA then
     local pos = Config.Zones.ShopOutside.Pos
     local netId, err = exports.mdp_garages:SpawnOwnedVehicle(plate, vector4(pos.x, pos.y, pos.z, Config.Zones.ShopOutside.Heading), source)
     if netId then
