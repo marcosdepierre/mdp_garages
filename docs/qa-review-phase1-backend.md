@@ -352,3 +352,34 @@ R2-M2 (comprador offline / política de desconexión) y TR-3..TR-5 → backlog d
 
 ## Veredicto R4 (HEAD `bb6397a`)
 **v6 correcto en lo que promete (0 Altas nuevas). El backend de propiedad sigue SIN poder cerrarse por P1-OWN-R3-H1 (abierta, sin tocar).** Nuevas: R4-M1 (amplía M4 / filas antiguas "nuevas" por config), R4-L1 (ventana hasta ~55 min) y R4-L2 (SQL sin test).
+
+---
+
+# Propiedad R5 (e10f763)
+
+- Fecha: 16/10/2026, 23:35 (UTC+1). Árbol limpio de `e10f763`. Backend solo pasó `luac -p`; los tests son de QA.
+- `luac54 -p`: OK. `/tmp/qa/p1/test.lua`: **35/35**. `own_r5.lua` (own_r4 + 10 casos R5, incluido `takeOut` real con mocks): **61/61**. `tr5.lua`: **11/12** (FAIL = R2-L1, sin cambios). `imp_r5.lua`: **13/13**. `web/tests/error-codes.e2e.mjs`: **FALLA** (`+duplicate_plate` en Constants y architecture.md vs NUI) → R5-M1. La NUI no cambió, así que no ejecuté el resto de e2e.
+
+## R3-H1: **CERRADO**
+- `checkFrameworkOwner` (garages.lua:89-104) se llama dentro del lock y **antes** de cualquier UPDATE en `takeOut` (:143, antes de `IsOwner` y del UPDATE con `AND owner = ?`), en `SpawnOwnedVehicle` (:633, antes de `row.owner ~= ident`) y en store/park (vía `lockedOwnVehicle`). Una sola consulta indexada (`plate = ? OR plate = ?`, LIMIT 2) por operación, y solo si `SyncFrameworkTables`.
+- Harness:
+  - `takeOut` del vendedor tras una venta sin sincronizar → `not_owner`, 0 spawns, la fila sigue GARAGED con el dueño cambiado a B (`ApplyTransfer(..., locked=true)`) ✓.
+  - `SpawnOwnedVehicle` del vendedor → `not_owner` + transferencia ✓.
+  - El comprador lo saca después → OK ✓.
+- Sin regresiones: el dueño legítimo con el framework de acuerdo → takeOut OK. Fila solo de mdp (sin fila en el framework) → takeOut y store OK ✓. Los titulares de llaves siguen pudiendo hacer takeOut (sin cambio de diseño).
+
+## R3-M2 (duplicate_plate): **backend OK, gap de Frontend**
+- 2 o más filas → `duplicate_plate` en takeOut, store y park (harness), log `ADMIN` + `LogReject`. Código en `Constants.ErrorCodes` y en `locales/en.lua`/`es.lua` ✓.
+- **Falta** en `NUI_ERROR_CODES`, en el fallback `i18n.tsx`, en `web/dist` y en la lista de architecture.md → el test de sincronización de códigos falla → **P1-OWN-R5-M1 (Frontend + doc)**.
+
+## R3-M1 (reinicio con clones): **CERRADO**, con matices
+- Solo se adopta el **único** candidato con marca de servidor válida; los clones sin marca vacíos se borran y los ocupados se ignoran; con 0 o varios marcados → nada y la fila sigue OUT (persistence.lua:144-163). Revisado leyendo el código (onStart no tiene harness).
+- **¿Puede borrar el coche REAL?** Un griefer no puede crear una entidad marcada (secreto + bag no replicado), así que con exactamente 1 marcado, ese es el real y los borrados son clones. Excepciones:
+  - El real perdió la marca (cliente sin strict mode, P1R3-L2) **y** hay otro marcado: se borra el sin marca, pero sobrevive uno → no hay pérdida de coche.
+  - Un coche de **otro recurso** con la misma matrícula y modelo, vacío → se borra (R5-L1).
+  - Un real sin marca y sin ningún marcado → no se borra nada ✓.
+- Griefer: clon ocupado durante el reinicio → se ignora y se adopta el real ✓. Clon vacío → borrado ✓. Después, el clon no se puede guardar ni adoptar (R3) ✓.
+- El gap conocido (sin ningún marcado → el dueño no puede guardar) sigue como **P1-OWN-M1**.
+
+## Veredicto R5 (HEAD `e10f763`)
+**Backend de propiedad: 0 Crítica/Alta → R3-H1 cerrado; se puede cerrar por parte de Backend.** Queda **P1-OWN-R5-M1 (Frontend: `duplicate_plate` falta en la NUI; el e2e de códigos de error está en rojo)** y la deuda Media/Baja del backlog (R4-M1, M1, M3, M4, R5-L1, …).
