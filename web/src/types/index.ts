@@ -1,0 +1,62 @@
+// Mirrors docs/architecture.md → "NUI contract". Keep in sync with client/main.lua.
+export type ViewName = 'list' | 'detail';
+export type GarageKind = 'public' | 'private' | 'impound';
+
+/** 0=out, 1=garaged, 2=parked_world, 3=impounded, 4=retired (inactivity; recovered via app, phase 7) */
+export enum VehicleState { Out = 0, Garaged = 1, ParkedWorld = 2, Impounded = 3, Retired = 4 }
+
+export interface Garage {
+  /** 'public:<id>' | 'private:<id>' | 'impound:<id>' */
+  id: `${GarageKind}:${string}`;
+  kind: GarageKind;
+  label: string;
+  /** private only */ slots?: number;
+  /** private only */ used?: number;
+  /** impound only; display only (server recomputes) */ fee?: number;
+}
+
+/** Plate validation: uppercase A-Z, 0-9, space; 1-8 chars. */
+export const PLATE_RE = /^[A-Z0-9 ]{1,8}$/;
+export const isValidPlate = (p: string) => PLATE_RE.test(p);
+
+export interface Vec3 { x: number; y: number; z: number }
+
+export interface ImpoundInfo { reason: string; fee: number; /** unix seconds */ release_after: number | null }
+
+export interface Vehicle {
+  /** normalized, 1-8 chars [A-Z0-9 ] (GTA limit); see PLATE_RE */ plate: string;
+  model: string;
+  label: string;
+  state: VehicleState;
+  /** 0-100 */ fuel: number;
+  /** 0-1000 */ engine: number;
+  /** 0-1000 */ body: number;
+  mileage: number;
+  mileage_unit: 'km' | 'mi';
+  garage_id: string | null;
+  /** false = key holder */ is_owner: boolean;
+  /** only if permitted */ coords?: Vec3;
+  /** state 3 only */ impound?: ImpoundInfo;
+}
+
+export interface OpenData { garage: Garage; vehicles: Vehicle[] }
+
+// Lua → NUI
+export type NuiMessage =
+  | { action: 'open'; view: ViewName; data: OpenData }
+  | { action: 'update'; data: Partial<OpenData>; view?: ViewName }
+  | { action: 'close' };
+
+// NUI → Lua
+export type NuiErrorCode =
+  | 'invalid_request' | 'invalid_garage' | 'server_error' | 'not_owner' | 'too_far'
+  | 'rate_limited' | 'locked' | 'already_out' | 'unpaid_fines' | 'insufficient_funds' | 'world_limit';
+
+export interface NuiResponse<T = unknown> { ok: boolean; error?: NuiErrorCode; data?: T }
+
+export interface NuiCallbacks {
+  close: { req: Record<string, never>; res: undefined };
+  getVehicles: { req: { garage_id: string }; res: Vehicle[] };
+  takeOut: { req: { plate: string; garage_id: string }; res: { netId: number } };
+}
+export type NuiEvent = keyof NuiCallbacks;

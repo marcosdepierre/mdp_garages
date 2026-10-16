@@ -1,0 +1,22 @@
+Locales = Locales or {}
+Locales.en = {
+    framework_detected = 'mdp_garages: framework detected: %s',
+    standalone_warning = 'mdp_garages: NO FRAMEWORK FOUND (qbx_core/qb-core/es_extended). Running in STANDALONE mode: money, jobs and identifiers are stubbed!',
+    not_enough_money = 'You do not have enough money',
+    no_access = 'You do not have access to this vehicle',
+    too_far = 'You are too far away',
+    world_limit_player = 'You already have the maximum of %d vehicles parked on the street',
+    world_limit_server = 'The city is full of parked vehicles, use a garage',
+    fine_paid = 'Fine paid: $%d',
+    fine_pay_failed = 'Could not pay fine (%s)',
+    err_invalid_request = 'Invalid request',
+    err_fine_not_found = 'Fine not found or already paid',
+    err_already_paid = 'This fine is already paid',
+    err_external_invoice = 'This fine was sent as an invoice, pay it from your billing menu',
+    err_busy = 'Please wait a moment and try again',
+    err_generic = 'Something went wrong',
+    err_retired_vehicle = 'This vehicle was retired, recover it from the phone app',
+    err_already_out = 'This vehicle is already out',
+    err_no_spawn = 'No free spawn point',
+    vehicle_out = 'Vehicle %s is ready',
+}

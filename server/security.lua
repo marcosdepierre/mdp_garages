@@ -1,0 +1,417 @@
+--[[
+    mdp_garages - server/security.lua
+    Módulo de seguridad reutilizable (Lua 5.4, lado servidor FiveM).
+    Ver docs/security.md para las reglas obligatorias.
+
+    API de Bridge esperada (la provee bridge/*.lua):
+      Bridge.GetIdentifier(source) -> string|nil   -- license/citizenid/identifier del framework
+      Bridge.GetJob(source) -> { name = string, grade = integer, onDuty|onduty = boolean? }|nil
+      Bridge.GetMoney(source, account) -> number             (account: 'cash'|'bank')
+      Bridge.RemoveMoney(source, account, amount, reason) -> boolean
+      Bridge.Notify(source, msg, type)                       (opcional)
+
+    Requiere '@oxmysql/lib/MySQL.lua', '@ox_lib/init.lua' y shared/utils.lua (Utils) cargados antes.
+]]
+
+Security = Security or {}
+
+---------------------------------------------------------------------------
+-- Configuración (sobrescribible desde shared/config.lua vía Config.Security)
+---------------------------------------------------------------------------
+local cfgSrc = (type(Config) == 'table' and type(Config.Security) == 'table') and Config.Security or {}
+
+Security.Config = {
+    debug             = cfgSrc.debug or false,
+    resourceName      = GetCurrentResourceName(),
+    ownedTable        = cfgSrc.ownedTable or 'mdp_vehicles', -- Config.Security.ownedTable si existe
+    plateColumn       = cfgSrc.plateColumn or 'plate',
+    ownerColumn       = cfgSrc.ownerColumn or 'owner',
+    keysTable         = cfgSrc.keysTable or 'mdp_vehicle_keys',
+    allowKeyHolders   = cfgSrc.allowKeyHolders ~= false, -- OWN incluye titulares de llaves
+    defaultRateLimit  = cfgSrc.defaultRateLimit or { max = 5, windowMs = 2000 },
+    lockTimeoutMs     = cfgSrc.lockTimeoutMs or 10000,
+    flagThreshold     = cfgSrc.flagThreshold or 20, -- rechazos antes de disparar OnSuspicious
+}
+
+-- Whitelist de tablas/columnas permitidas para identificadores dinámicos en SQL.
+local SQL_IDENT_WHITELIST = {
+    mdp_vehicles = true, mdp_vehicle_keys = true, holder = true,
+    plate = true, owner = true, state = true, garage_id = true,
+}
+
+---------------------------------------------------------------------------
+-- Logging y hooks preparados para anticheat/ban
+---------------------------------------------------------------------------
+local rejectCount = {} ---@type table<integer, integer>
+
+--- Hook sobrescribible: integrar aquí Discord webhook / anticheat / ban.
+--- NO banear automáticamente por defecto: los falsos positivos (lag) existen.
+---@param src integer
+---@param reason string
+---@param data table
+function Security.OnSuspicious(src, reason, data) end
+
+---@param src integer
+---@param event string
+---@param reason string
+---@param extra table|nil
+function Security.LogReject(src, event, reason, extra)
+    rejectCount[src] = (rejectCount[src] or 0) + 1
+    local ident = (Bridge and Bridge.GetIdentifier) and Bridge.GetIdentifier(src) or 'unknown'
+    print(('[%s][SECURITY] rechazo src=%s id=%s evento=%s motivo=%s'):format(
+        Security.Config.resourceName, tostring(src), tostring(ident), event, reason))
+    if rejectCount[src] == Security.Config.flagThreshold then
+        Security.OnSuspicious(src, 'too_many_rejects', { event = event, reason = reason, extra = extra, identifier = ident })
+    end
+end
+
+---------------------------------------------------------------------------
+-- Validadores
+---------------------------------------------------------------------------
+Security.V = {}
+local V = Security.V
+
+--- Matrícula: trim + mayúsculas, 1-12 caracteres [A-Z0-9 ] (mdp_vehicles.plate VARCHAR(12)).
+--- Delegado en shared/utils.lua para que cliente y servidor usen la misma regla.
+function V.isPlate(v) return Utils.IsValidPlate(v) end
+
+--- Normaliza matrícula (trim + mayúsculas). nil si no es string.
+function V.normalizePlate(v) return Utils.NormalizePlate(v) end
+
+--- garage_id con formato public|private|impound:<id>.
+function V.isGarageId(v) return Utils.IsValidGarageId(v) end
+
+function V.isInt(v, min, max)
+    if math.type(v) ~= 'integer' then
+        if type(v) ~= 'number' or v ~= v or v % 1 ~= 0 then return false end
+    end
+    if min and v < min then return false end
+    if max and v > max then return false end
+    return true
+end
+
+function V.isString(v, maxLen, pattern)
+    if type(v) ~= 'string' then return false end
+    if maxLen and #v > maxLen then return false end
+    if pattern and not v:match(pattern) then return false end
+    return true
+end
+
+--- Identificador genérico [%w_-] hasta 32 (NO usar para garage_id: usar V.isGarageId).
+function V.isId(v) return V.isString(v, 32, '^[%w_%-]+$') end
+
+function V.isBool(v) return type(v) == 'boolean' end
+
+function V.clamp(n, min, max)
+    n = tonumber(n) or min
+    if n < min then return min elseif n > max then return max end
+    return n
+end
+
+--- Elimina HTML, caracteres de control y recorta longitud.
+function V.sanitizeString(v, maxLen)
+    if type(v) ~= 'string' then return '' end
+    v = v:gsub('<[^>]*>', ''):gsub('[<>"\'`&]', ''):gsub('%c', '')
+    v = v:gsub('^%s+', ''):gsub('%s+$', '')
+    maxLen = maxLen or 64
+    if #v > maxLen then v = v:sub(1, maxLen) end
+    return v
+end
+
+-- Fábricas cómodas para schemas
+function Security.Int(min, max) return function(v) return V.isInt(v, min, max) end end
+function Security.Str(maxLen, pattern) return function(v) return V.isString(v, maxLen, pattern) end end
+function Security.Optional(fn) return function(v) return v == nil or fn(v) end end
+
+local TYPE_VALIDATORS = {
+    plate = V.isPlate, garage = V.isGarageId, int = function(v) return V.isInt(v) end, id = V.isId,
+    string = function(v) return V.isString(v, 255) end, boolean = V.isBool,
+    number = function(v) return type(v) == 'number' and v == v and v ~= math.huge and v ~= -math.huge end,
+}
+
+--- Valida payload contra schema. Rechaza campos desconocidos.
+---@return boolean ok, string|nil err
+function Security.ValidateSchema(data, schema)
+    if schema == nil then return true end
+    if type(data) ~= 'table' then return false, 'payload_not_table' end
+    for k in pairs(data) do
+        if schema[k] == nil then return false, 'unknown_field:' .. tostring(k) end
+    end
+    for field, rule in pairs(schema) do
+        local fn = type(rule) == 'function' and rule or TYPE_VALIDATORS[rule]
+        if not fn then return false, 'bad_schema_rule:' .. field end
+        if not fn(data[field]) then return false, 'invalid_field:' .. field end
+    end
+    if data.plate ~= nil then data.plate = V.normalizePlate(data.plate) end
+    return true
+end
+
+---------------------------------------------------------------------------
+-- Rate limiting por jugador y evento (ventana deslizante)
+---------------------------------------------------------------------------
+local buckets = {} ---@type table<integer, table<string, number[]>>
+
+---@return boolean allowed
+function Security.RateLimit(src, key, max, windowMs)
+    local now = GetGameTimer()
+    local pb = buckets[src]
+    if not pb then pb = {}; buckets[src] = pb end
+    local list = pb[key]
+    if not list then list = {}; pb[key] = list end
+    local cutoff, j = now - windowMs, 0
+    for i = 1, #list do
+        if list[i] > cutoff then j = j + 1; list[j] = list[i] end
+    end
+    for i = #list, j + 1, -1 do list[i] = nil end
+    if j >= max then return false end
+    list[j + 1] = now
+    return true
+end
+
+---------------------------------------------------------------------------
+-- Locks por matrícula (anti-duplicación / anti doble spawn)
+---------------------------------------------------------------------------
+local plateLocks = {} ---@type table<string, {src: integer, at: integer}>
+
+---@return boolean acquired
+function Security.Lock(plate, src)
+    plate = V.normalizePlate(plate)
+    if not plate then return false end
+    local now, l = GetGameTimer(), plateLocks[plate]
+    if l and (now - l.at) < Security.Config.lockTimeoutMs then return false end
+    plateLocks[plate] = { src = src or 0, at = now }
+    return true
+end
+
+function Security.Unlock(plate)
+    plate = V.normalizePlate(plate)
+    if plate then plateLocks[plate] = nil end
+end
+
+function Security.IsLocked(plate)
+    plate = V.normalizePlate(plate)
+    local l = plate and plateLocks[plate]
+    return l ~= nil and l ~= false and (GetGameTimer() - l.at) < Security.Config.lockTimeoutMs
+end
+
+--- Ejecuta fn con el lock tomado y lo libera siempre (incluso si fn falla).
+function Security.WithLock(plate, src, fn, ...)
+    if not Security.Lock(plate, src) then return false, 'locked' end
+    local res = table.pack(pcall(fn, ...))
+    Security.Unlock(plate)
+    if not res[1] then error(res[2], 0) end
+    return table.unpack(res, 2, res.n)
+end
+
+---------------------------------------------------------------------------
+-- Seguimiento de vehículos spawneados (plate -> netId)
+---------------------------------------------------------------------------
+local spawned = {} ---@type table<string, {netId: integer, src: integer}>
+
+---@param plate string
+---@param netId integer
+---@param src integer|nil
+function Security.TrackSpawn(plate, netId, src)
+    plate = V.normalizePlate(plate)
+    if not plate or math.type(netId) ~= 'integer' then return false end
+    spawned[plate] = { netId = netId, src = src }
+    return true
+end
+
+function Security.UntrackSpawn(plate)
+    plate = V.normalizePlate(plate)
+    if plate then spawned[plate] = nil end
+end
+
+--- Devuelve la entidad si el vehículo de esa matrícula sigue existiendo.
+function Security.GetSpawnedEntity(plate)
+    plate = V.normalizePlate(plate)
+    local s = plate and spawned[plate]
+    if not s then return nil end
+    local ent = NetworkGetEntityFromNetworkId(s.netId)
+    if ent ~= 0 and DoesEntityExist(ent) then return ent, s.netId end
+    spawned[plate] = nil
+    return nil
+end
+
+---------------------------------------------------------------------------
+-- SQL seguro
+---------------------------------------------------------------------------
+--- Devuelve el identificador SQL si está en la whitelist; error si no.
+function Security.SqlIdent(name)
+    if type(name) ~= 'string' or not SQL_IDENT_WHITELIST[name] then
+        error(('identificador SQL no permitido: %s'):format(tostring(name)), 2)
+    end
+    return '`' .. name .. '`'
+end
+
+--- Comprueba propiedad por matrícula + identificador (Bridge.GetIdentifier), SQL parametrizado.
+--- Acepta también titulares de llaves (mdp_vehicle_keys.plate/holder) salvo allowKeys == false
+--- o Config.Security.allowKeyHolders == false.
+---@param src integer
+---@param plate string
+---@param allowKeys boolean|nil
+---@return boolean isOwner, string|nil via  -- via = 'owner' | 'key'
+function Security.IsOwner(src, plate, allowKeys)
+    if not (Bridge and Bridge.GetIdentifier) then return false end
+    local ident = Bridge.GetIdentifier(src)
+    if type(ident) ~= 'string' or ident == '' or not V.isPlate(plate) then return false end
+    plate = V.normalizePlate(plate)
+    local c = Security.Config
+    local q = ('SELECT 1 FROM %s WHERE %s = ? AND %s = ? LIMIT 1'):format(
+        Security.SqlIdent(c.ownedTable), Security.SqlIdent(c.plateColumn), Security.SqlIdent(c.ownerColumn))
+    if MySQL.scalar.await(q, { plate, ident }) ~= nil then return true, 'owner' end
+    if allowKeys == false or not c.allowKeyHolders then return false end
+    return Security.IsKeyHolder(src, plate, ident), 'key'
+end
+
+--- Titular de llave: mdp_vehicle_keys (plate, holder), con FK a mdp_vehicles.plate.
+function Security.IsKeyHolder(src, plate, ident)
+    ident = ident or (Bridge and Bridge.GetIdentifier and Bridge.GetIdentifier(src))
+    if type(ident) ~= 'string' or ident == '' or not V.isPlate(plate) then return false end
+    local q = ('SELECT 1 FROM %s WHERE `plate` = ? AND `holder` = ? LIMIT 1'):format(
+        Security.SqlIdent(Security.Config.keysTable))
+    return MySQL.scalar.await(q, { V.normalizePlate(plate), ident }) ~= nil
+end
+
+---------------------------------------------------------------------------
+-- Comprobaciones de trabajo y distancia
+---------------------------------------------------------------------------
+---@param src integer
+---@param job {names: string[]|table<string,boolean>, minGrade: integer|nil, requireDuty: boolean|nil}
+---@return boolean
+function Security.HasJob(src, job)
+    if not (Bridge and Bridge.GetJob) then return false end
+    local pj = Bridge.GetJob(src)
+    if not pj or not pj.name then return false end
+    local allowed = false
+    for k, v in pairs(job.names or {}) do
+        if v == pj.name or (k == pj.name and v == true) then allowed = true break end
+    end
+    if not allowed then return false end
+    -- Bridge puede devolver onDuty u onduty. Por defecto se exige estar de servicio
+    -- (architecture.md); job.requireDuty = false lo desactiva.
+    local duty = pj.onDuty
+    if duty == nil then duty = pj.onduty end
+    if job.requireDuty ~= false and duty == false then return false end
+    return (tonumber(pj.grade) or 0) >= (job.minGrade or 0)
+end
+
+---@param src integer
+---@param coords vector3|{x:number,y:number,z:number}  -- SIEMPRE de config/entidad del servidor
+---@param max number
+---@return boolean
+function Security.IsNear(src, coords, max)
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 or not coords or type(max) ~= 'number' then return false end
+    local p = GetEntityCoords(ped)
+    local dx, dy, dz = p.x - coords.x, p.y - coords.y, p.z - coords.z
+    return (dx * dx + dy * dy + dz * dz) <= (max * max)
+end
+
+---------------------------------------------------------------------------
+-- Pipeline común de validación
+---------------------------------------------------------------------------
+--- Convierte argumentos posicionales (p.ej. `plate, garageId`) en tabla según opts.args.
+local function packArgs(opts, ...)
+    if opts.args then
+        local t, a = {}, table.pack(...)
+        for i, k in ipairs(opts.args) do t[k] = a[i] end
+        if a.n > #opts.args then t.__extra = true end -- argumentos sobrantes => rechazo por schema
+        return t
+    end
+    return (...)
+end
+Security.PackArgs = packArgs
+
+local function runChecks(name, src, opts, data)
+    src = tonumber(src)
+    if not src or src <= 0 or GetPlayerName(src) == nil then return false, 'invalid_source' end
+    local rl = opts.rateLimit or Security.Config.defaultRateLimit
+    if rl ~= false and not Security.RateLimit(src, name, rl.max, rl.windowMs) then
+        return false, 'rate_limited'
+    end
+    local ok, err = Security.ValidateSchema(data, opts.schema)
+    if not ok then return false, err end
+    if opts.job and not Security.HasJob(src, opts.job) then return false, 'job_denied' end
+    if opts.requireOwnership then
+        if type(data) ~= 'table' or not V.isPlate(data.plate) then return false, 'no_plate' end
+        if not Security.IsOwner(src, data.plate) then return false, 'not_owner' end
+    end
+    if opts.distance then
+        -- getCoords(src, data) debe resolver coords DESDE CONFIG/servidor, nunca desde data.coords
+        local c = opts.distance.getCoords(src, data)
+        if not c or not Security.IsNear(src, c, opts.distance.max or 10.0) then
+            return false, 'too_far'
+        end
+    end
+    return true
+end
+
+---------------------------------------------------------------------------
+-- Registro de eventos seguros
+---------------------------------------------------------------------------
+---@param name string
+---@param opts table {args={'plate','garageId'}?, rateLimit={max,windowMs}|false, schema={campo=tipo|validador}, distance={getCoords=fn,max=n}, job={names,minGrade}, requireOwnership=bool}
+---@param handler fun(src: integer, data: table)
+function Security.RegisterSecureEvent(name, opts, handler)
+    opts = opts or {}
+    RegisterNetEvent(name, function(...)
+        local src = source
+        local data = packArgs(opts, ...)
+        local ok, err = runChecks(name, src, opts, data)
+        if not ok then
+            Security.LogReject(src, name, err, Security.Config.debug and { data = data } or nil)
+            return
+        end
+        local okH, errH = pcall(handler, src, data)
+        if not okH then
+            print(('[%s][SECURITY] error en handler %s: %s'):format(Security.Config.resourceName, name, tostring(errH)))
+        end
+    end)
+end
+
+--- Callback seguro sobre ox_lib lib.callback.register (sin fallback por eventos, ver architecture.md).
+--- El handler devuelve la respuesta.
+---@param name string
+---@param opts table  (mismas opciones que RegisterSecureEvent)
+---@param handler fun(src: integer, data: table): ...
+--- Si se rechaza, devuelve (false, motivo) al cliente.
+function Security.RegisterSecureCallback(name, opts, handler)
+    opts = opts or {}
+    if not (lib and lib.callback and lib.callback.register) then
+        print(('[%s][SECURITY] ox_lib no disponible (dependencia obligatoria); callback %s no registrado'):format(Security.Config.resourceName, name))
+        return false
+    end
+    lib.callback.register(name, function(src, ...)
+        local data = packArgs(opts, ...)
+        local ok, err = runChecks(name, src, opts, data)
+        if not ok then
+            Security.LogReject(src, name, err, Security.Config.debug and { data = data } or nil)
+            return false, err
+        end
+        local res = table.pack(pcall(handler, src, data))
+        if not res[1] then
+            print(('[%s][SECURITY] error en callback %s: %s'):format(Security.Config.resourceName, name, tostring(res[2])))
+            return false, 'internal_error'
+        end
+        return table.unpack(res, 2, res.n)
+    end)
+    return true
+end
+
+---------------------------------------------------------------------------
+-- Limpieza
+---------------------------------------------------------------------------
+AddEventHandler('playerDropped', function()
+    local src = source
+    buckets[src] = nil
+    rejectCount[src] = nil
+    for plate, l in pairs(plateLocks) do
+        if l.src == src then plateLocks[plate] = nil end
+    end
+    -- Los vehículos spawneados se mantienen trackeados; la política de despawn/
+    -- devolución al garaje la decide server/main.lua.
+end)
+
+return Security

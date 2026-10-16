@@ -1,0 +1,26 @@
+-- qb-phone invoices adapter. Source: github.com/qbcore-framework/qb-phone server.lua
+-- No bill export: same INSERT as qb-phone's /bill command, then TriggerClientEvent('qb-phone:RefreshPhone', target).
+-- Paid hook: TriggerEvent('qb-phone:server:paidInvoice', source, invoiceId) -> SupportsPaidHook = true
+if not Bridge.IsServer then return end
+local RES = 'qb-phone'
+
+Bridge.RegisterAdapter('billing', RES, {
+    SupportsPaidHook = true,
+    SendBill = function(src, target, amount, reason, society, meta)
+        if not Bridge.ValidAmount(amount) then return false end
+        local cid = Bridge.GetIdentifier(target); if not cid then return false end
+        local sender = (src and src > 0 and Bridge.GetIdentifier(src)) or 'mdp_garages'
+        local id = MySQL.insert.await(
+            'INSERT INTO phone_invoices (citizenid, amount, society, sender, sendercitizenid) VALUES (?, ?, ?, ?, ?)',
+            { cid, amount, society or 'police', reason or 'Garage', sender })
+        if not id then return false end
+        BillingCommon.Link(RES, id, meta)
+        TriggerClientEvent('qb-phone:RefreshPhone', target)
+        return true
+    end,
+})
+
+AddEventHandler('qb-phone:server:paidInvoice', function(src, invoiceId)
+    if GetInvokingResource() ~= RES then return end
+    BillingCommon.OnPaid(RES, invoiceId, src)
+end)
