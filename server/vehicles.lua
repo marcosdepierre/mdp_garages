@@ -73,7 +73,7 @@ function Vehicles.MapFrameworkRow(framework, r)
         local gid = state ~= VS.IMPOUNDED and Utils.ResolveGarageId(r.garage and ('public:' .. tostring(r.garage)) or nil, plate) or nil
         return { plate = plate, owner = r.citizenid, model = tostring(r.vehicle or 'unknown'), props = capProps(r.mods, plate), vtype = 'automobile',
                  state = state, garage_id = gid, fuel = tonumber(r.fuel) or 100,
-                 engine = tonumber(r.engine) or 1000, body = tonumber(r.body) or 1000 }
+                 engine = Security.ClampHealth('engine', r.engine), body = Security.ClampHealth('body', r.body) }
     end
 end
 
