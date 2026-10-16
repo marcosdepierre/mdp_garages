@@ -215,7 +215,7 @@ function Security.Lock(plate, src)
     return token
 end
 
---- Libera el lock solo si el token coincide; si no, lo registra y devuelve false.
+--- Libera el lock solo si el token coincide; si no, devuelve false (log solo en debug).
 ---@param plate string
 ---@param token string
 ---@return boolean
@@ -224,8 +224,11 @@ function Security.Unlock(plate, token)
     local l = plate and plateLocks[plate]
     if not l then return false end
     if token == nil or l.token ~= token then
-        print(('[%s][SECURITY] Unlock rechazado: token no coincide (clave=%s, dueño src=%s)'):format(
-            Security.Config.resourceName, tostring(plate), tostring(l.src)))
+        -- Tras un takeover legítimo (lock caducado) esto es normal: solo se registra en debug.
+        if Security.Config.debug then
+            print(('[%s][SECURITY] Unlock ignorado: token no coincide (clave=%s, dueño src=%s)'):format(
+                Security.Config.resourceName, tostring(plate), tostring(l.src)))
+        end
         return false
     end
     plateLocks[plate] = nil
