@@ -3,8 +3,12 @@
 local GARAGE_INTERACT = 38 -- E
 local RES = GetCurrentResourceName()
 local busy = false -- one store/park request at a time (server also rate-limits 1/s)
-local attempt = 0  -- token: the safety timeout / late results only act on their own attempt
-local SAFETY_MS = 15000 -- > server-side callback handling; frees the player if the callback never returns
+local attempt = 0  -- token per request: timers / late responses only act on their own attempt
+-- P1F-M2: ox_lib's lib.callback.await has NO per-call timeout (2nd arg = throttle delay; the only timeout is
+-- the global convar 'ox:callbackTimeout', default 300 s). So we use the async form lib.callback(name, false, cb, ...)
+-- with our own explicit timeout, and a safety backstop above it.
+local CALLBACK_TIMEOUT_MS = 15000
+local SAFETY_MS = 20000
 
 local function toast(t) exports[RES]:GarageToast(t) end
 
@@ -16,35 +20,43 @@ local function readVehicle(veh)
     return props, tonumber(fuel), MDPClientMileage(plate)
 end
 
---- lib.callback -> {ok, error?} (pcall-safe)
-local function call(name, payload)
-    local ok, res = pcall(lib.callback.await, name, false, payload)
-    if not ok or type(res) ~= 'table' then return { ok = false, error = 'server_error' } end
-    return res
-end
-
---- Security F1: run a store/park flow so `busy` is ALWAYS released (pcall + safety timeout).
---- fn(token) returns the result toast; a stale token (timed out) never toasts or touches busy.
-local function guarded(toastId, fn)
+--- Security F1 / P1F-M2: busy stays set while the request is alive and is ALWAYS released
+--- (response, callback timeout, safety timer, or a Lua error). prepare() -> { event, payload, map(res) -> toast }.
+local function guarded(toastId, prepare)
     if busy then return end
     busy = true
     attempt = attempt + 1
     local token = attempt
-    SetTimeout(SAFETY_MS, function()
-        if busy and attempt == token then
-            busy = false
-            attempt = attempt + 1 -- invalidate the late result
-            toast({ id = toastId, kind = 'error', error = 'timeout' })
-        end
-    end)
-    local ok, result = xpcall(fn, debug.traceback)
-    if attempt ~= token then return end -- safety timeout already fired
-    busy = false
-    if not ok then
-        print(('^1[mdp_garages] %s flow error:^7 %s'):format(toastId, tostring(result)))
-        result = { id = toastId, kind = 'error', error = 'server_error' }
+    local settled = false -- this attempt's outcome toast was already shown
+    local function release() if attempt == token then busy = false end end
+    local function fail(code)
+        if not settled then settled = true; toast({ id = toastId, kind = 'error', error = code }) end
+        release()
     end
-    if type(result) == 'table' then toast(result) end -- same id replaces (dismisses) the loading toast
+
+    SetTimeout(SAFETY_MS, function() if busy and attempt == token then fail('timeout') end end) -- backstop: always unlocks
+
+    local ok, spec = xpcall(prepare, debug.traceback)
+    if not ok or type(spec) ~= 'table' then
+        if not ok then print(('^1[mdp_garages] %s flow error:^7 %s'):format(toastId, tostring(spec))) end
+        return fail('server_error')
+    end
+    -- callback timeout: tell the player (timeout toast) but keep busy so the request can't be re-sent while it may
+    -- still be alive; only the response or the SAFETY_MS backstop releases it.
+    SetTimeout(CALLBACK_TIMEOUT_MS, function()
+        if not settled and attempt == token then settled = true; toast({ id = toastId, kind = 'error', error = 'timeout' }) end
+    end)
+    local sent, err = pcall(lib.callback, spec.event, false, function(res)
+        local okm, t = pcall(spec.map, type(res) == 'table' and res or { ok = false, error = 'server_error' })
+        if not okm or type(t) ~= 'table' then t = { id = toastId, kind = 'error', error = 'server_error' } end
+        if not settled then settled = true; toast(t)
+        elseif t.kind == 'success' then toast(t) end -- late success replaces the timeout toast; late error stays silent
+        release()
+    end, spec.payload)
+    if not sent then
+        print(('^1[mdp_garages] %s send error:^7 %s'):format(toastId, tostring(err)))
+        fail('server_error')
+    end
 end
 
 local function storeCurrent(garageId)
@@ -56,14 +68,15 @@ local function storeCurrent(garageId)
     local label = GetLabelText(GetDisplayNameFromVehicleModel(GetEntityModel(veh)))
     local plate = Utils.NormalizePlate(GetVehicleNumberPlateText(veh))
     toast({ id = 'store', kind = 'loading', titleKey = 'storing', description = label .. ' · ' .. plate })
-    local res = call('mdp_garages:storeVehicle', {
+    return { event = 'mdp_garages:storeVehicle', payload = {
         netId = NetworkGetNetworkIdFromEntity(veh), garage_id = garageId, vclass = GetVehicleClass(veh),
         props = props, fuel = fuel, mileage = mileage, -- no plate: resolved server-side
-    })
-    if res.ok then
-        return { id = 'store', kind = 'success', title = _L('vehicle_stored'), description = label .. ' · ' .. plate }
-    end
-    return { id = 'store', kind = 'error', error = res.error or 'server_error' }
+    }, map = function(res)
+        if res.ok then
+            return { id = 'store', kind = 'success', title = _L('vehicle_stored'), description = label .. ' · ' .. plate }
+        end
+        return { id = 'store', kind = 'error', error = res.error or 'server_error' }
+    end }
     end)
 end
 
@@ -97,12 +110,13 @@ RegisterCommand('mdp_park', function()
     guarded('park', function()
     local props, fuel, mileage = readVehicle(veh)
     toast({ id = 'park', kind = 'loading', titleKey = 'parking' })
-    local res = call('mdp_garages:parkWorld', {
+    return { event = 'mdp_garages:parkWorld', payload = {
         netId = NetworkGetNetworkIdFromEntity(veh), vclass = GetVehicleClass(veh),
         props = props, fuel = fuel, mileage = mileage,
-    })
-    if res.ok then return { id = 'park', kind = 'success', title = _L('vehicle_parked') } end
-    -- world_limit: server also sends a notify with the limit; the toast shows the generic err_world_limit
-    return { id = 'park', kind = 'error', error = res.error or 'server_error' }
+    }, map = function(res)
+        if res.ok then return { id = 'park', kind = 'success', title = _L('vehicle_parked') } end
+        -- world_limit: server also sends a notify with the limit; the toast shows the generic err_world_limit
+        return { id = 'park', kind = 'error', error = res.error or 'server_error' }
+    end }
     end)
 end, false)
