@@ -295,3 +295,36 @@ P1-OWN-M1 atascado sin re-adopción · M2 `/mdp_regularize` saca de incautado/re
 
 ## Veredicto R2 (HEAD `677f577`)
 **H1 y H2 CERRADOS. 0 Crítica/Alta.** Quedan Medias nuevas: R2-M1 (bloqueo de takeOut poniendo una matrícula falsa, DoS), R2-M2 (transferencia con comprador offline: política de desconexión) y R2-M3 (full scan en `FrameworkOwner`). Siguen M1/M3/M4. Pendiente de Security: adopción sin columna de fecha y multas al vender un coche incautado.
+
+---
+
+# Propiedad R3 (2b60c36)
+
+- Fecha: 16/10/2026, 23:25 (UTC+1). Árbol limpio de `2b60c36` (`git archive`). Líneas de `2b60c36`.
+- `luac54 -p`: OK. `/tmp/qa/p1/test.lua`: **35/35**. `own_r3.lua` (own_r2 + 9 casos R3, con el mock de UPDATE adaptado a `AND owner = ?`): **50/51**. `tr3.lua` (nuevo: `ApplyTransfer`/`onOwnerChanged`/`FrameworkOwner`): **11/12**. `imp_r3.lua`: **9/9** (sin columna de fecha → no adoptable).
+
+## Resultados
+| Caso | Resultado |
+|---|---|
+| Venta (framework) → el vendedor guarda o aparca | **OK** `not_owner` + transferencia dentro del lock. |
+| Venta (framework, sin sync aún) → el vendedor saca el coche (`takeOut` / `SpawnOwnedVehicle`) | **FALLA → P1-OWN-R3-H1** |
+| Venta ya aplicada en mdp → el vendedor saca el coche | OK: `IsOwner` dentro del lock + `UPDATE … AND owner = ?` → `not_owner` (garages.lua:123, 142-148). |
+| Llaves del vendedor revocadas | **OK**: borra `mdp_vehicle_keys` y llama a `RemoveKeys` para cada jugador online excepto el comprador; el comprador online hace `ClaimSpawn` (tr3). |
+| Clon de la matrícula con el coche en GARAGED | **OK**: el dueño lo saca (R2-M1 cerrado). |
+| Clon + coche real en el mundo, después | Store/park del clon (griefer o dueño, con o sin el bag `mdp_plate` falsificado) → rechazado; no se adopta (`managed_at` ya puesto, duplicado de matrícula). El coche real (marcado y trackeado) se guarda bien. **Pero en el reinicio → R3-M1.** |
+| Venta durante el store | La venta llega después de la comprobación y dentro del lock → el vendedor guarda; el siguiente sync transfiere la fila GARAGED. Carrera aceptada. Si el store tiene el lock, el `ApplyTransfer` del sync devuelve false (lock ocupado) y se reintenta en el siguiente sync ✓. |
+| Dos ventas seguidas A→B→C | OK: `UPDATE … AND owner = <anterior>`; una venta obsoleta A→C después de A→B se rechaza ✓; a uno mismo no hace nada ✓; REMOVED no se transfiere ✓. |
+| `FrameworkOwner` | `plate = ? OR plate = ?` (normalizada + con relleno a 8): usa el índice (ESX `owned_vehicles.plate` es PK; en QB/Qbox hay que comprobar el índice de `player_vehicles.plate`). Relleno de ESX ✓. **Doble espacio interno → no coincide (R2-L1 sigue abierto, tr3 FAIL).** 2 filas → `nil, 'ambiguous'` → falla en abierto (R3-M2). |
+| `/mdp_regularize` multas | Solo las del dueño actual en esa matrícula ✓. |
+| Adopción de filas importadas | Falla cerrado sin una columna DATETIME/TIMESTAMP → en los esquemas estándar de ESX/QB/Qbox nunca es adoptable ✓. |
+
+## Alta
+| # | Sev. | Archivo:línea | Descripción y reproducción | Arreglo |
+|---|---|---|---|---|
+| **P1-OWN-R3-H1** | **Alta** (el vendedor usa un coche ya vendido) | server/garages.lua:100-148 (`takeOut`) y :600-620 (`SpawnOwnedVehicle`): sin `FrameworkOwner` | A vende un coche GARAGED con un script del framework (`owned_vehicles.owner`/`citizenid` → B). Hasta que mdp sincroniza, `mdp_vehicles.owner` sigue siendo A, y `takeOut`/`SpawnOwnedVehicle` solo comprueban mdp → **A lo saca**. Harness: `SpawnOwnedVehicle` del vendedor → spawneado. Cuándo se corrige solo: `SyncRemovals` del vendedor solo actúa en filas `source='framework'` y estados 1/2, y el sync de `getVehicles` va en un hilo aparte con caché de 60 s (A puede sacarlo antes). Para filas de concesionario (`source='mdp'`) dura hasta que B haga sync (B offline = indefinido). Store/park sí lo bloquean (y entonces transfieren), pero A ya está conduciendo un coche ajeno. | Llevar el mismo bloque de lockedOwnVehicle (`FrameworkOwner` ≠ `row.owner` → `ApplyTransfer(..., true)` + `not_owner`) a `takeOut` y `SpawnOwnedVehicle` dentro del lock, antes del UPDATE. |
+
+## Aplazados (anotados)
+R2-M2 (comprador offline / política de desconexión) y TR-3..TR-5 → backlog de fase 2, según Backend.
+
+## Veredicto R3 (HEAD `2b60c36`)
+**NO se puede cerrar: 1 Alta (P1-OWN-R3-H1)**, la misma clase que H1 pero en la salida del garaje (takeOut/SpawnOwnedVehicle sin la comprobación del dueño en el framework). Es un arreglo de pocas líneas reutilizando el bloque de `lockedOwnVehicle`. TR-1/TR-2, R2-M1, R2-M3 y fail-closed: correctos. Medias nuevas: R3-M1 (clon + reinicio → atascado) y R3-M2 (2 filas en el framework → falla en abierto).
