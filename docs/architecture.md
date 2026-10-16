@@ -54,7 +54,7 @@ Tables are prefixed `mdp_` so they don't clash with ESX `owned_vehicles` / QB `p
 | `mdp_private_garages` | purchased garages with interior; `config_id` = property key from server config | owner; UNIQUE(owner, config_id) stops a double click from buying twice; UNIQUE(owner, label) |
 | `mdp_impound` | impound records (fee, release_after, location, released) | plate, released; FK plate CASCADE |
 | `mdp_fines` | fines; `channel` ENUM internal/invoice/external/needs_review, `paid` 0/1/2/3 (unpaid/paid/claiming/voided) | plate, owner, paid; FK plate CASCADE |
-| `mdp_fine_invoices` | billing invoice → fine mapping (`provider`, `invoice_id`, `fine_id`), written by `BillingCommon.Link` and read by `BillingCommon.OnPaid` (bridge/billing/_common.lua, which also creates it at runtime) | PK(provider, invoice_id); fine_id `INT UNSIGNED` FK → `mdp_fines(id)` ON DELETE CASCADE |
+| `mdp_fine_invoices` | billing invoice → fine mapping (`provider`, `invoice_id`, `fine_id`), written by `Bridge.BillingCommon.Link` and read by `Bridge.BillingCommon.OnPaid` (bridge/billing/_common.lua; the table is created by `sql/install.sql`) | PK(provider, invoice_id); fine_id `INT UNSIGNED` FK → `mdp_fines(id)` ON DELETE CASCADE |
 | `mdp_schema_version` | applied schema versions (currently **2**: v2 adds `mdp_vehicles.vtype`; `server/persistence.lua` checks `information_schema` at start and ALTERs only if the column is missing; manual alternative `sql/upgrade_v2.sql`); future phases add idempotent ALTERs keyed by version. The server warns at start if the version is lower than `Constants.SchemaVersion` | PK(version) |
 
 `state` constants (`shared/constants.lua`): `Constants.VehicleState`: `0=OUT, 1=GARAGED, 2=PARKED_WORLD, 3=IMPOUNDED, 4=RETIRED`.
@@ -158,7 +158,7 @@ Fines go through the **billing adapter** (`Bridge.Billing.Call('SendBill', …)`
 **Channels** (`mdp_fines.channel`, `Constants.FineChannel`, chosen by `Bridge.Billing.IssueFine`):
 | channel | When | Payment path |
 |---|---|---|
-| `invoice` | the billing adapter supports fines (`SupportsFines ~= false`), `SendBill` returned true, and `BillingCommon.HasInvoice(fineId)` is true | paid in the resource; paid hook → `BillingCommon.OnPaid` → `MarkFinePaid` |
+| `invoice` | the billing adapter supports fines (`SupportsFines ~= false`), `SendBill` returned true, and `Bridge.BillingCommon.HasInvoice(fineId)` is true | paid in the resource; paid hook → `Bridge.BillingCommon.OnPaid` → `MarkFinePaid` |
 | `internal` | no adapter; the adapter has `SupportsFines == false` (**okokBilling is not used for fines**); or `SendBill` failed and no invoice is linked | `mdp_garages:payFine` / `/mdp_payfine` |
 | `needs_review` | `SendBill` returned true but no invoice got linked (logged to the console) | blocked for players. Staff resolve it with `/mdp_finereview <id> paid\|void` (`server/fine_review.lua`, Integrations; the manifest loads it through a glob that tolerates its absence) |
 | `external` | kept in the ENUM, **unused for fines** | – |
@@ -174,7 +174,7 @@ Adapter choice: the first started adapter in PRIORITY order (**esx_billing, then
 **Adapters present** (Integrations, see [integrations.md](integrations.md)): auto order is okokBilling, then esx_billing, then qb-phone.
 
 **Internal payment** (`server/fines.lua`): the `mdp_garages:payFine` lib.callback `{fineId}` (schema int, RATE 2/2 s) and `/mdp_payfine <fineId>`.
-1. The row must have `owner = Bridge.GetIdentifier(src)`, `paid = 0` and `channel = 'internal'`, with no linked invoice (`BillingCommon.HasInvoice`). Otherwise the call fails with `external_invoice`. The amount is read **from the DB only** and checked with `Bridge.ValidAmount`.
+1. The row must have `owner = Bridge.GetIdentifier(src)`, `paid = 0` and `channel = 'internal'`, with no linked invoice (`Bridge.BillingCommon.HasInvoice`). Otherwise the call fails with `external_invoice`. The amount is read **from the DB only** and checked with `Bridge.ValidAmount`.
 2. Inside `Security.WithLock('fine:'..id, src, fn)`, the fine is **claimed as CHARGING** with `UPDATE … SET paid=2 WHERE id=? AND owner=? AND paid=0 AND channel='internal'`. The call continues only if affectedRows == 1.
 3. `Bridge.RemoveMoney(src, 'bank', amount)`. On failure: `UPDATE … SET paid=0 WHERE id=? AND paid=2`. On success: `UPDATE … SET paid=1 WHERE id=? AND paid=2` and fire `mdp_garages:server:finePaid`.
 4. Error codes are mapped to locale strings before they're shown to the player.
