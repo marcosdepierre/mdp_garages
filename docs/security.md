@@ -155,6 +155,8 @@ La matrícula sale de la marca o del tracking (`opts.plate` como candidata, que 
 
 ### Adopción en el primer guardado (concesionarios de terceros)
 - **Vía preferida:** el export de servidor `RegisterExternalVehicle(netId, plate)` → `Security.RegisterExternalVehicle(netId, plate, ownerSrc?)`. Hace `MarkServerEntity` + `TrackSpawn` si la entidad existe, la matrícula visible es `plate`, no tiene ninguna marca mdp, no está trackeada para otra matrícula, no hay otra entidad trackeada para `plate`, y la fila existe con el mismo modelo y en estado OUT. No cambia el dueño ni el estado. Solo se puede llamar desde el servidor (los exports no son accesibles desde el cliente) y deja registro con `GetInvokingResource()`.
+- `Security.IsTrackedEntity(ent) -> plate|nil` (índice inverso netId → matrícula): cualquier entidad trackeada, para la matrícula que sea, **no** pasa por la adopción. Va por la ruta normal (`CanStoreOwnVehicle`) o por `/mdp_regularize`.
+- **Filas importadas del framework:** solo son adoptables si se detectan por primera vez en una sincronización **incremental** de un dueño ya conocido (`mdp_meta.initial_import_done` + `mdp_synced_owners`), en estado OUT, y con la fecha del framework en `[-5 min, +30 min]` cuando existe esa columna (valor NULL → no adoptable). La migración inicial, `mdp_migrate` y la primera sincronización de cada dueño → `managed_at = NOW()`.
 - **Heurística de respaldo:** detrás de `Config.AllowFirstStoreAdoption = false` (por defecto). Si se activa, todo esto es obligatorio:
   - Rechazar la entidad si tiene **cualquier** marca mdp (`mdp_srv`/`mdp_plate`) o está trackeada para otra matrícula.
   - `GetEntityPopulationType(ent) == 7` (misión/script, no ambiental).

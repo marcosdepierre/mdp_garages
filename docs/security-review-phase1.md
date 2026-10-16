@@ -337,3 +337,71 @@ Reservado y false por defecto. Si se activa, contradice el requisito de Marcos (
 
 ## Veredicto
 El requisito «solo vehículos propios» queda **cumplido en storeVehicle**. En **parkWorld** queda cumplido para guardar/aparcar, pero tiene el efecto secundario previo OV-1, que hay que arreglar antes de cerrar. `/mdp_regularize` necesita OV-2 antes de usarse en producción.
+
+---
+
+# Re-revisión 5 — Adopción en el primer guardado, exports de concesionario y filas importadas (16/10/2026, 23:20 UTC+1)
+
+Commits revisados: `53c2c56` (SpawnOwnedVehicle), `7de0844` (adopción en el primer guardado, RegisterExternalVehicle, esquema v5 `managed_at`) y `7ad284c` (filas importadas: `mdp_synced_owners`, `mdp_meta.initial_import_done`, guarda `IsTrackedEntity`).
+
+## Nuevo en security.lua
+`Security.IsTrackedEntity(ent) -> plate|nil`. Usa un índice inverso `netId → plate` que mantienen `TrackSpawn` (al re-trackear desvincula la entidad anterior; un netId solo puede representar una matrícula), `UntrackSpawn` y `GetSpawnedEntity` (al limpiar entradas obsoletas). `ClaimSpawn` y la limpieza de `playerDropped` conservan el netId (solo cambian `src`). Comprueba que la entidad siga existiendo y que `NetworkGetEntityFromNetworkId(netId) == ent`. `PlateOfEntity` y `RegisterExternalVehicle` ya lo usan (O(1)).
+
+## Política de adopción (los 7 puntos) frente a `7de0844` + `7ad284c`
+
+| # | Punto | Estado | Dónde / nota |
+|---|---|---|---|
+| 1 | Rechazar si tiene cualquier marca mdp o está trackeada para otra matrícula | **Parcial** | `garages.lua` `adoptUnmarked`: `IsTrackedEntity(ent)` (cualquier matrícula) + `mdp_plate` + `IsServerEntity(ent, plate)` + `GetSpawnedEntity(plate)`. Falta `mdp_srv` **de otra matrícula** → AD-3. |
+| 2 | `GetEntityPopulationType == 7` | Cumple | |
+| 3 | Ventana de 30 min desde la creación de la fila | Cumple | Constante `ADOPT_WINDOW_MIN = 30` (no configurable); `created_at` NULL → nunca. |
+| 4 | Props de BD/stock + solo `PropSnapshotFields` | Cumple | `adoptionProps`, y después pasa por `SanitizeProps`. |
+| 5 | Un solo uso (`managed_at`), rate limit y auditoría | Cumple | UPDATE condicional `managed_at IS NULL` con deshacer si pierde la carrera; 3 cada 10 min por jugador; `AUDIT adopt …`. |
+| 6 | Dueño = jugador, misma matrícula y modelo, fila nunca gestionada, sin otra entidad viva, jugador al volante | Cumple | Recorrido del pool por matrícula visible; `requireDriver`. Solo en `storeVehicle`; `parkWorld` rechaza la adopción. |
+| 7 | Mitigaciones fijas en el código, no configurables | Cumple, **pero** el interruptor general `Config.AllowFirstStoreAdoption` vale **`true`** por defecto (`shared/config.lua`), cuando la política dice `false` → AD-1. |
+
+**Orden del flujo** (`storeVehicle`): `storeTarget` (si hay marca demostrada → ruta normal; si no hay marca y existe fila → candidata a adopción) → rate limit de adopción → lock → `adoptUnmarked` (marca + tracking + `managed_at`) → `lockedOwnVehicle` / `CanStoreOwnVehicle` con los 7 puntos completos → efectos. **Correcto.** Rechazar cuando `IsTrackedEntity` devuelve *cualquier* matrícula, incluida la misma, también es correcto: una entidad trackeada y marcada para esa matrícula nunca llega a la adopción (va por la ruta normal en `storeTarget`). Una trackeada **sin** marca (heredada) no debe adoptarse, sino regularizarse (`/mdp_regularize`).
+
+## RegisterExternalVehicle (export, `7de0844`)
+Cumple la política: `Config.TrustedResources` contrastado con `GetInvokingResource()` (lista vacía = export desactivado; nunca el propio recurso), fila creada hace < 60 s (fijo), estado OUT, `managed_at` NULL, entidad sin marca ni tracking, sin otra entidad viva con la matrícula, misma matrícula y modelo, tipo de población 7, con lock y auditoría. Nota: `Security.RegisterExternalVehicle` (security.lua) es la primitiva de bajo nivel, **sin** las comprobaciones de recurso de confianza ni de ventana. No debe exportarse directamente: el export del backend es la vía autorizada.
+
+## Backfill de `managed_at` (v5)
+Se ejecuta una sola vez, al crear la columna: `managed_at = updated_at` para filas con estado 1/2/3, con props o coords, con `source = 'framework'`, con `created_at` NULL o con más de 30 min. Las importaciones nuevas entran con `managed_at = NOW()` salvo la excepción de `7ad284c`. Solo quedan NULL las filas `mdp` en OUT, sin props ni coords y con menos de 30 min (exactamente las entregas recientes de concesionario). **Correcto.**
+
+## Filas importadas (`7ad284c`)
+
+| Requisito | Estado |
+|---|---|
+| Solo sincronización incremental (`initial_import_done` + dueño en `mdp_synced_owners`) | Cumple (`vehicles.lua` `syncPlayer`, `adoptable = initialDone and known`) |
+| Primera sincronización por identificador → `NOW()` | Cumple (el dueño se añade después de su primera sincronización) |
+| `mdp_migrate` y todo lo anterior al flag → `NOW()` | Cumple (`ImportFromFramework` sin `opts` → `NOW()`; el flag se pone tras `SyncConnectedPlayers` en el arranque, o en el upgrade si había dueños) |
+| Solo OUT (ESX `stored=0`, QB `state=0`), nunca GARAGED | Cumple (`r.state == VS.OUT` después de R4-1, que pasa a GARAGED las OUT sin entidad viva) |
+| Ventana de 30 min sobre la columna de fecha del framework | **Parcial** → AD-2 |
+| Siembra de dueños existentes en el upgrade | Cumple (solo si la tabla no existía) |
+
+## Hallazgos
+
+**AD-1 (Medio) — La adopción en el primer guardado está activada por defecto**
+`shared/config.lua`: `Config.AllowFirstStoreAdoption = true` (y el alias legado también es `true` por defecto). La política exige `false`; la vía preferida es `RegisterExternalVehicle`. *Arreglo:* que el valor por defecto sea `false` (también en `adoptionEnabled()` cuando el valor es nil).
+
+**AD-2 (Medio) — Ventana de fecha del framework: NULL y fechas futuras la abren**
+`vehicles.lua` `InsertBatch`: `r.fwCreatedTs == nil or (os.time() - ts) <= 1800`.
+- (a) Si la tabla **tiene** columna de fecha pero el valor es NULL (o `UNIX_TIMESTAMP` devuelve NULL por un formato raro), cuenta como «sin ventana» → adoptable.
+- (b) Una fecha **futura** (desfase de zona horaria si el framework escribe la hora local como texto, o un reloj desajustado) da un delta negativo y pasa el `<= 1800` → adoptable durante horas.
+- (c) Si la columna es un INT con epoch o un VARCHAR, `UNIX_TIMESTAMP()` da 0 o NULL → caso (a).
+
+*Arreglo:* distinguir «la tabla no tiene columna» de «valor NULL» (con columna y valor NULL → **no** adoptable). Exigir `-300 <= os.time() - ts <= 1800` (5 min de margen por desfase). Si la columna no es DATETIME/TIMESTAMP (`information_schema.columns.DATA_TYPE`), ignorarla y registrar un aviso al detectarla.
+
+**AD-3 (Bajo) — Marca `mdp_srv` de otra matrícula**
+`garages.lua` `adoptUnmarked`: `IsServerEntity(ent, plate)` solo detecta la marca de **esta** matrícula. Una entidad marcada para X, sin trackear (caso P1R3-H1) y con la state bag `mdp_plate` borrada por su dueño de red, puede adoptarse como Y si Y es una fila propia en la ventana. *Arreglo:* rechazar si `Entity(ent).state.mdp_srv ~= nil` (cualquier valor) o si `Security.PlateOfEntity(ent) ~= nil`.
+
+**AD-4 (Medio) — `SpawnOwnedVehicle` desde OUT puede duplicar**
+`garages.lua` (`53c2c56`): con el estado OUT solo comprueba `GetSpawnedEntity(plate)`. Si existe una entidad viva **sin trackear** con esa matrícula (P1R3-H1 `keepOut`, o un coche del concesionario aún sin registrar), se crea otra → duplicado. *Arreglo:* en OUT, recorrer el pool (`Utils.WorldVehiclesByPlate()[plate]`) y devolver `already_out` si hay alguna entidad con esa matrícula. Además, restringir el export a `Config.TrustedResources` como `RegisterExternalVehicle` (hoy lo acepta cualquier recurso; Bajo).
+
+**AD-5 (Bajo) — Renombrar la columna de fecha del framework**
+`frameworkDateCol` se cachea por tabla durante toda la ejecución. Si la columna se renombra o se borra en caliente, la SELECT con `UNIX_TIMESTAMP(\`col\`)` falla → `okQ = false` → la sincronización de ese dueño falla hasta reiniciar (no abre la adopción; falla cerrado). *Arreglo:* si la consulta falla, vaciar `dateColCache[tbl]` y reintentar una vez sin la columna.
+
+**AD-6 (Info) — Dueño que nunca se sincronizó**
+Primera sincronización = no adoptable, y luego pasa a ser conocido. `mdp_migrate` no añade dueños a `mdp_synced_owners`, así que tras migrar su primera sincronización tampoco es adoptable (conservador, correcto). Si `SyncConnectedPlayers` falla a medias en el arranque, `initial_import_done` se marca igual. Las filas de los no sincronizados siguen sin ser adoptables (lo protege `known`), así que no hay riesgo.
+
+## Veredicto
+Los requisitos de adopción y del export se cumplen salvo **AD-1** (valor por defecto) y **AD-2** (ventana de fecha), que hay que arreglar antes de cerrar la fase 1, y **AD-4** (duplicado en `SpawnOwnedVehicle`). AD-3, AD-5 y AD-6 son Bajos o informativos.

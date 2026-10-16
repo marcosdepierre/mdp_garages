@@ -260,16 +260,41 @@ local spawned = {} ---@type table<string, {netId: integer, src: integer}>
 ---@param plate string
 ---@param netId integer
 ---@param src integer|nil
+local byNet = {} ---@type table<integer, string>  índice inverso netId -> plate
+
 function Security.TrackSpawn(plate, netId, src)
     plate = V.normalizePlate(plate)
     if not plate or math.type(netId) ~= 'integer' then return false end
+    local old = spawned[plate]
+    if old and byNet[old.netId] == plate then byNet[old.netId] = nil end
+    local prev = byNet[netId]
+    if prev and prev ~= plate then spawned[prev] = nil end -- un netId solo puede representar una matrícula
     spawned[plate] = { netId = netId, src = src }
+    byNet[netId] = plate
     return true
 end
 
 function Security.UntrackSpawn(plate)
     plate = V.normalizePlate(plate)
-    if plate then spawned[plate] = nil end
+    if not plate then return end
+    local s = spawned[plate]
+    if s and byNet[s.netId] == plate then byNet[s.netId] = nil end
+    spawned[plate] = nil
+end
+
+--- ¿Esta entidad está trackeada (para CUALQUIER matrícula)? Devuelve la matrícula o nil.
+--- Comprueba que la entidad siga existiendo y que el netId apunte a ella (limpia entradas obsoletas).
+---@param ent integer
+---@return string|nil plate
+function Security.IsTrackedEntity(ent)
+    if not ent or ent == 0 or not DoesEntityExist(ent) then return nil end
+    local netId = NetworkGetNetworkIdFromEntity(ent)
+    local plate = netId and byNet[netId]
+    if not plate then return nil end
+    local s = spawned[plate]
+    if not s or s.netId ~= netId then byNet[netId] = nil return nil end
+    if NetworkGetEntityFromNetworkId(netId) ~= ent then return nil end
+    return plate
 end
 
 --- Devuelve la entidad si el vehículo de esa matrícula sigue existiendo.
@@ -279,6 +304,7 @@ function Security.GetSpawnedEntity(plate)
     if not s then return nil end
     local ent = NetworkGetEntityFromNetworkId(s.netId)
     if ent ~= 0 and DoesEntityExist(ent) then return ent, s.netId end
+    if byNet[s.netId] == plate then byNet[s.netId] = nil end
     spawned[plate] = nil
     return nil
 end
@@ -604,10 +630,8 @@ function Security.PlateOfEntity(ent)
     if not ent or ent == 0 or not DoesEntityExist(ent) then return nil end
     local p = serverEnts[ent]
     if p then return p end
-    local netId = NetworkGetNetworkIdFromEntity(ent)
-    for plate, sp in pairs(spawned) do
-        if sp.netId == netId and Security.IsServerEntity(ent, plate) then return plate end
-    end
+    local plate = Security.IsTrackedEntity(ent)
+    if plate and Security.IsServerEntity(ent, plate) then return plate end
     return nil
 end
 
@@ -693,9 +717,8 @@ function Security.RegisterExternalVehicle(netId, plate, ownerSrc)
     if not ent or ent == 0 or not DoesEntityExist(ent) or GetEntityType(ent) ~= 2 then return false, 'invalid_entity' end
     if V.normalizePlate(GetVehicleNumberPlateText(ent) or '') ~= plate then return false, 'plate_mismatch' end
     if serverEnts[ent] ~= nil or Entity(ent).state[SRV_KEY] ~= nil then return false, 'already_marked' end
-    for p, sp in pairs(spawned) do
-        if sp.netId == netId and p ~= plate then return false, 'tracked_other_plate' end
-    end
+    local trackedAs = Security.IsTrackedEntity(ent)
+    if trackedAs and trackedAs ~= plate then return false, 'tracked_other_plate' end
     if Security.GetSpawnedEntity(plate) then return false, 'already_tracked' end
     local c = Security.Config
     local q = ('SELECT `model`, `state` FROM %s WHERE %s = ? LIMIT 1'):format(Security.SqlIdent(c.ownedTable), Security.SqlIdent(c.plateColumn))
