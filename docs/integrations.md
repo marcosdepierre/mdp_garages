@@ -391,6 +391,13 @@ Este es el **único applier**: el de `client/props.lua` (Backend) se elimina. El
 mdp_garages solo deja guardar o aparcar vehículos **marcados por el servidor** (`Security.MarkServerEntity`). Un coche que el concesionario crea por su cuenta no se puede guardar, salvo por las vías 2 y 3. **Orden de preferencia: `SpawnOwnedVehicle` > `RegisterExternalVehicle` > adopción en el primer guardado.**
 
 ### Exports (servidor, solo se pueden llamar desde otro recurso)
+**Requisito común:** `SpawnOwnedVehicle` y `RegisterExternalVehicle` exigen que el recurso que llama (`GetInvokingResource()`) esté en `Config.TrustedResources`. La lista está vacía por defecto. El dueño del servidor tiene que añadir el nombre exacto del concesionario:
+```lua
+-- shared/config.lua
+Config.TrustedResources = { 'qbx_vehicleshop', 'qb-vehicleshop', 'esx_vehicleshop' }
+```
+⚠️ En el código actual (`server/garages.lua:528-570`), `SpawnOwnedVehicle` solo exige que la llamada venga de otro recurso (si no, devuelve `invalid_source`). La comprobación de `TrustedResources` está anunciada por Backend, pero **aún no está en el código**.
+
 **`AddVehicle`**: `exports.mdp_garages:AddVehicle(owner, plate, model, props?, garageId?) -> ok, err?` (`server/vehicles.lua:245-308`)
 - `owner` = identificador del framework (citizenid en qb/qbx, `xPlayer.getIdentifier()` en ESX).
 - `garageId = 'out'` crea la fila en OUT (necesario para las vías 1, 2 y 3); otro valor la crea en GARAGED en ese garaje; `nil`, en el garaje por defecto.
@@ -405,6 +412,7 @@ mdp_garages solo deja guardar o aparcar vehículos **marcados por el servidor** 
 |---|---|
 | `invalid_plate` | matrícula vacía o no válida |
 | `invalid_coords` | coords no numéricas, infinitas o fuera del mapa |
+| `untrusted_resource` | el recurso que llama no está en `Config.TrustedResources` (⚠️ pendiente en el código, ver arriba) |
 | `invalid_source` | `src` no está conectado o no tiene identificador, o la llamada no viene de otro recurso |
 | `rate_limited` | más de 3 llamadas en 10 s por jugador |
 | `not_ready` | mdp todavía arrancando |
@@ -422,7 +430,7 @@ mdp_garages solo deja guardar o aparcar vehículos **marcados por el servidor** 
   - estado OUT y fila no gestionada todavía;
   - entidad sin marcar y sin trackear, y ninguna otra entidad con esa matrícula;
   - la matrícula visible y el modelo coinciden con la fila;
-  - entidad de script (population type 7).
+  - entidad de script (population type 7). ⚠️ Pendiente del smoke test: no se ha verificado en el juego con `ESX.OneSync.SpawnVehicle` ni con `qbx.spawnVehicle`.
 - No da llaves ni aplica props: de eso se encarga el concesionario.
 
 | Error | Significado |
@@ -434,12 +442,24 @@ mdp_garages solo deja guardar o aparcar vehículos **marcados por el servidor** 
 | `not_owned_vehicle` | no hay fila (o está en REMOVED) |
 | `invalid_state` | la fila no está en OUT |
 | `vehicle_mismatch` | ya gestionado, fuera de la ventana de 60 s, ya marcado o trackeado, matrícula duplicada o distinta, modelo distinto o entidad que no es de script |
+| `rate_limited` | ⚠️ pendiente: Backend está añadiendo un límite por recurso; todavía no está en el código |
 | `locked` | matrícula bloqueada |
 
-**Adopción en el primer guardado** (fallback si el concesionario no se modifica): `Config.AllowFirstStoreAdoption = true` (valor por defecto).
-- Al primer guardado, el dueño (que debe ir conduciendo) adopta un coche sin marcar.
-- La fila tiene que estar en OUT, no haber sido gestionada nunca y tener **menos de 30 min**. Límite: 3 adopciones cada 10 min por jugador, con log de auditoría.
-- ⚠️ **Hoy solo funciona con filas creadas con `AddVehicle`.** Las filas escritas directamente en `player_vehicles`/`owned_vehicles` llegan por import con `managed_at` fijado y no son adoptables, a la espera de la revisión de Security. Un concesionario sin modificar que **no** llame a `AddVehicle` todavía no queda cubierto.
+**Adopción en el primer guardado** (fallback para concesionarios **sin modificar**). Clave: `Config.AllowFirstStoreAdoption = true` (por defecto; alias heredado `Config.AdoptUnmarkedOnFirstStore`). El resto de mitigaciones están fijas en el código (`server/garages.lua:232-300`, `server/vehicles.lua:90-140`, commit 7ad284c).
+
+Qué filas son adoptables (con `managed_at` NULL):
+- las creadas con `AddVehicle(..., 'out')`;
+- **las importadas por primera vez desde `player_vehicles`/`owned_vehicles`** en una **sync incremental**: el dueño ya se había sincronizado antes (`mdp_synced_owners`) y la importación inicial ya terminó (`mdp_meta.initial_import_done`). La fila además tiene que ser nueva para mdp, estar en OUT en el framework (`stored=0`/`state=0`) y seguir en OUT tras la regla R4-1. Si la tabla del framework tiene columna de fecha, la fila debe tener ≤ 30 min. La importación inicial y las filas de dueños que se ven por primera vez entran con `managed_at = NOW()` y **no** son adoptables.
+
+Condiciones al guardar:
+- estado OUT, `managed_at` NULL (un solo uso) y fila creada hace **< 30 min**;
+- quien guarda es el **dueño** (no un titular de llave) y va **conduciendo**;
+- la entidad no está marcada ni trackeada, no hay otra entidad con la misma matrícula, la matrícula y el modelo coinciden y es una entidad de script (population type 7, ⚠️ pendiente del smoke test);
+- límite de 3 adopciones cada 10 min por jugador (`rate_limited`), con log `AUDIT adopt`. Las props se toman de la BD/stock más solo `Security.PropSnapshotFields` del cliente.
+
+⚠️ **Caveat:** el concesionario tiene que hacer el spawn del coche **antes de la siguiente sync** de ese jugador (al cargar o al abrir el garaje, con caché de 60 s). Si la sync importa la fila y no hay ninguna entidad con esa matrícula, R4-1 la pasa a GARAGED y ya no se puede adoptar (el jugador la saca desde el garaje con normalidad).
+
+⚠️ **Pendiente de confirmación (Backend):** posible conflicto entre el `INSERT IGNORE` del import y una fila creada antes con `AddVehicle` para la misma matrícula (qué fila gana y su `managed_at`).
 
 ### 1) Recomendado: `AddVehicle` + `SpawnOwnedVehicle`
 El concesionario mantiene su INSERT en la tabla del framework y, además, llama a `AddVehicle(owner, plate, model, nil, 'out')` y **sustituye su spawn** por `SpawnOwnedVehicle`. Las llaves, las props y el combustible los pone mdp.
@@ -450,7 +470,7 @@ El concesionario mantiene su INSERT en la tabla del framework y, además, llama 
 ### 2) Secundario: `RegisterExternalVehicle` (el concesionario hace el spawn)
 ```lua
 -- shared/config.lua (dueño del servidor): nombre EXACTO del recurso del concesionario
-Config.TrustedResources = { 'qbx_vehicleshop' }
+Config.TrustedResources = { 'qbx_vehicleshop', 'qb-vehicleshop', 'esx_vehicleshop' }
 ```
 ```lua
 -- en el concesionario, justo después de su INSERT y de SU spawn (antes de 60 s desde AddVehicle):
@@ -463,7 +483,7 @@ if not ok then print(('[shop] mdp RegisterExternalVehicle %s: %s'):format(plate,
 Si `errA == 'plate_exists'` porque la fila ya era antigua, la ventana de 60 s no se cumple y el resultado será `vehicle_mismatch`.
 
 ### 3) Último recurso: adopción en el primer guardado
-No hay que tocar el concesionario más allá de llamar a `AddVehicle(owner, plate, model, nil, 'out')`. El jugador guarda el coche en menos de 30 min conduciéndolo.
+Sirve para concesionarios **sin modificar** (solo escriben en la tabla del framework y hacen el spawn ellos mismos), o para los que llaman a `AddVehicle(owner, plate, model, nil, 'out')`. El dueño guarda el coche conduciéndolo en menos de 30 min. Hay que tener en cuenta el caveat de la sync.
 
 ---
 
@@ -473,7 +493,7 @@ Fuente: https://github.com/Qbox-project/qbx_vehicleshop
 - `server/main.lua:226-265`, `sellShowroomVehicle`: lo mismo para la venta a otro jugador (`CreatePlayerVehicle` en l.256 y `SpawnVehicle(playerId, …)` en l.261). Los otros flujos que llaman a `SpawnVehicle` (financiación, etc.) siguen el mismo patrón.
 - `server/utils.lua:99-124`, `function SpawnVehicle(src, data)`: lee el vehículo con `exports.qbx_vehicles:GetPlayerVehicle(vehicleId)` y hace el spawn con `qbx.spawnVehicle`, `Entity.state.vehicleid` y `config.giveKeys` (`config/server.lua:15`, `exports.qbx_vehiclekeys:GiveKeys(src, vehicle)`). **Es el único sitio que hay que cambiar** para cubrir todos los flujos.
 
-Sustitución recomendada del cuerpo de `SpawnVehicle` (`server/utils.lua`):
+Requisito: `Config.TrustedResources = { 'qbx_vehicleshop' }` en mdp. Sustitución recomendada del cuerpo de `SpawnVehicle` (`server/utils.lua`):
 ```lua
 function SpawnVehicle(src, data)
     local coords, vehicleId = data.coords, data.vehicleId
@@ -503,26 +523,60 @@ Fuente: https://github.com/qbcore-framework/qb-vehicleshop
 - Mismo patrón en `financeVehicle` (l.339-395, insert en l.356/375 y evento en l.371/390) y en `sellShowroomVehicle` (l.399-430, insert en l.418 y evento en l.428).
 - `client.lua:842-855`: el cliente pide `qb-vehicleshop:server:spawnvehicle` (`server.lua:46-70`, `CreateVehicleServerSetter`), aplica las props, `LegacyFuel` y `vehiclekeys:client:SetOwner`, y mete al jugador en el coche.
 
-Sustitución en el servidor, en cada una de las 6 líneas `TriggerClientEvent('qb-vehicleshop:client:buyShowroomVehicle', …)` (`target`/`playerid` en la venta):
+Requisito: `Config.TrustedResources = { 'qb-vehicleshop' }` en mdp.
+
+Campos de `Config.Shops[shop]` confirmados en `config.lua` (l.13-43, tienda `pdm`): `['Zone']` (polígono con `shape`, `minZ`, `maxZ`), `['Location']` (`vector3`, posición del blip), `['VehicleSpawn']` (`vector4`, spawn de compra) y `['TestDriveSpawn']`. El cliente guarda la tienda actual en `insideShop` (`client.lua:273/343`).
+
+**Cliente** (`client.lua`, menú de compra, l.295-300): enviar también la tienda:
 ```lua
-local function mdpDeliver(src, citizenid, vehicle, plate, coords)
+params = {
+    isServer = true,
+    event = 'qb-vehicleshop:server:buyShowroomVehicle',
+    args = {
+        buyVehicle = Config.Shops[insideShop]['ShowroomVehicles'][ClosestVehicle].chosenVehicle,
+        shop = insideShop, -- nuevo
+    }
+}
+```
+**Servidor** (`server.lua`): validar la tienda por distancia y sustituir el `TriggerClientEvent('qb-vehicleshop:client:buyShowroomVehicle', …)`:
+```lua
+local MAX_SHOP_DIST = 60.0 -- m desde Config.Shops[shop].Location (blip); ajustar al tamaño de la Zone
+
+--- Devuelve la tienda validada o nil. Nunca confía en el cliente sin comprobar la distancia.
+local function validShop(src, shop)
+    local cfg = type(shop) == 'string' and Config.Shops[shop]
+    if not cfg or not cfg['Location'] or not cfg['VehicleSpawn'] then return nil end
+    local ped = GetPlayerPed(src); if ped == 0 then return nil end
+    if #(GetEntityCoords(ped) - cfg['Location']) > MAX_SHOP_DIST then return nil end
+    return cfg
+end
+
+local function mdpDeliver(src, citizenid, vehicle, plate, shopCfg)
     local ok, err = exports.mdp_garages:AddVehicle(citizenid, plate, vehicle, nil, 'out')
     if not ok and err ~= 'plate_exists' then print(('[qb-vehicleshop] mdp AddVehicle %s: %s'):format(plate, err)) return end
-    local netId, e = exports.mdp_garages:SpawnOwnedVehicle(plate, coords, src)
+    local netId, e = exports.mdp_garages:SpawnOwnedVehicle(plate, shopCfg['VehicleSpawn'], src)
     if not netId then print(('[qb-vehicleshop] mdp SpawnOwnedVehicle %s: %s'):format(plate, e)) return end
     TaskWarpPedIntoVehicle(GetPlayerPed(src), NetworkGetEntityFromNetworkId(netId), -1)
 end
--- en lugar de: TriggerClientEvent('qb-vehicleshop:client:buyShowroomVehicle', src, vehicle, plate)
-mdpDeliver(src, cid, vehicle, plate, Config.Shops[GetShopForPlayer(src)].VehicleSpawn)
+
+RegisterNetEvent('qb-vehicleshop:server:buyShowroomVehicle', function(vehicle)
+    local src = source
+    local shopCfg = validShop(src, vehicle and vehicle.shop)
+    if not shopCfg then return TriggerClientEvent('QBCore:Notify', src, Lang:t('error.notallowed') or 'Not allowed', 'error') end
+    vehicle = vehicle.buyVehicle
+    -- ... código original (cobro + INSERT INTO player_vehicles) ...
+    -- en lugar de: TriggerClientEvent('qb-vehicleshop:client:buyShowroomVehicle', src, vehicle, plate)
+    mdpDeliver(src, cid, vehicle, plate, shopCfg)
+end)
 ```
-⚠️ Sin confirmar: el servidor original no sabe en qué tienda está el jugador (`tempShop`/`insideShop` son variables de cliente, `client.lua:843`), así que `GetShopForPlayer` **no existe** y hay que resolverlo (p. ej. pasando la tienda desde el cliente y validándola por distancia), o usar la alternativa 2 (`AddVehicle(cid, plate, vehicle, nil, 'pillboxgarage')`) y quitar el `TriggerClientEvent`. El `INSERT` original es asíncrono (`MySQL.insert` sin await), pero eso no afecta a mdp.
+⚠️ Hay que **validar la tienda antes de cobrar**. El ejemplo lo hace al principio del handler. `Lang:t('error.notallowed')`: no he confirmado que esa clave exista en los locales de qb-vehicleshop, así que usa una que exista. Para `financeVehicle` (l.339) y `sellShowroomVehicle` (l.399) hay que añadir el mismo `shop` en sus menús de cliente. En la venta, la distancia se valida para **el vendedor** y la entrega es al `target`.
 
 ### esx_vehicleshop (ESX Legacy): puntos de enganche ✅
 Fuente: https://github.com/esx-framework/ESX-Legacy-Addons/tree/main/%5Besx_addons%5D/esx_vehicleshop
 - `server/main.lua:371-405`, callback `esx_vehicleshop:buyVehicle`: `INSERT INTO owned_vehicles (owner, plate, vehicle)` (l.386) y, dentro del callback del insert, `ESX.OneSync.SpawnVehicle(joaat(model), Config.Zones.ShopOutside.Pos, Config.Zones.ShopOutside.Heading, { plate = plate }, …)` (l.396) + `TaskWarpPedIntoVehicle`.
 - `server/main.lua:180-215`, evento `esx_vehicleshop:setVehicleOwnedPlayerId` (venta del concesionario de trabajo): INSERT desde `cardealer_vehicles` (l.212). En este flujo no hay spawn en el servidor, así que conviene usar la alternativa 2 (`AddVehicle(xTarget.getIdentifier(), plate, model, props, '<garageId>')`).
 
-Sustitución del bloque `ESX.OneSync.SpawnVehicle(...)` (l.396-403):
+Requisito: `Config.TrustedResources = { 'esx_vehicleshop' }` en mdp. Sustitución del bloque `ESX.OneSync.SpawnVehicle(...)` (l.396-403):
 ```lua
 local okA, errA = exports.mdp_garages:AddVehicle(xPlayer.getIdentifier(), plate, model, nil, 'out')
 if okA or errA == 'plate_exists' then
