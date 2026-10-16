@@ -11,7 +11,7 @@ await suite(async ({ page, check }) => {
 
   await page.goto(`${BASE}/?view=detail&plate=MDP001`); await page.waitForSelector('text=Take out');
   await page.getByRole('button', { name: /take out/i }).click();
-  await page.waitForTimeout(800);
+  await page.waitForTimeout(1500);
   check('Take out ok hides the panel', !(await panelVisible()));
 
   await page.goto(`${BASE}/?view=detail&plate=MDP002`); await page.waitForSelector('text=Take out');

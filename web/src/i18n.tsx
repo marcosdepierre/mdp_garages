@@ -69,12 +69,34 @@ export const EN: LocaleTable = {
   err_fine_not_found: "Fine not found or already paid",
   err_in_use: "Someone is using this vehicle",
   err_vehicle_moved: "This vehicle is no longer where it was parked",
+  err_invalid_props: "Vehicle data was rejected by the server",
+  retry: "Retry",
+  cancel: "Cancel",
+  impound_pay_title: "Impound release",
+  impound_pay: "Pay %s to release",
   err_occupied: "Everyone else must leave the vehicle first (you must be the driver)",
+  // --- NUI phase 1 keys NOT yet in locales/*.lua (Backend to add to Locales.*.ui) ---
+  storing: "Storing vehicle…",
+  parking: "Parking vehicle…",
+  taken_out: "Vehicle taken out",
+  available_now: "Available now",
+  empty_hint: "Store a vehicle near the garage point to see it here.",
+  impound_reason: "Reason",
 };
 
-export type T = (key: string) => string;
-export const makeT = (locale?: LocaleTable): T => (key) => locale?.[key] ?? EN[key] ?? key;
+/** t(key, ...args): Lua locale → EN fallback → key. `%s` / `%d` placeholders are filled in order. */
+export type TF = (key: string, ...args: (string | number)[]) => string;
+export const makeT = (locale?: LocaleTable): TF => (key, ...args) => {
+  let i = 0;
+  const raw = locale?.[key] ?? EN[key] ?? key;
+  return args.length ? raw.replace(/%[sd]/g, () => String(args[i++] ?? '')) : raw;
+};
 export const errorKey = (code?: NuiErrorCode | string) => (code ? `err_${normalizeError(code)}` : 'error');
 
-export const I18nContext = createContext<T>(makeT());
+export const I18nContext = createContext<TF>(makeT());
 export const useT = () => useContext(I18nContext);
+
+/** BCP-47 tag for Intl from Config.Locale ('es' → 'es-ES'). */
+export const langTag = (lang?: string) => ({ es: 'es-ES', en: 'en-US' } as Record<string, string>)[lang ?? ''] ?? lang ?? 'en-US';
+export const LangContext = createContext<string>('en-US');
+export const useLang = () => useContext(LangContext);

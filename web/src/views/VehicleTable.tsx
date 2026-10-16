@@ -6,9 +6,12 @@ import { useT } from '@/i18n';
 import { stateMeta } from '@/state';
 import type { Vehicle } from '@/types';
 import { clampPct, statColor } from './stats';
+import { cx } from '@/utils/cx';
 
-export function VehicleTable({ label, vehicles, selected, onSelect }: {
+export function VehicleTable({ label, vehicles, selected, onSelect, locked, dimmed }: {
   label: string; vehicles: Vehicle[]; selected?: string; onSelect?: (v: Vehicle) => void;
+  /** §9.1 Loading: every row disabled while a take-out is in flight. */ locked?: boolean;
+  /** §10.3 retired rows: opacity-70. */ dimmed?: boolean;
 }) {
   const t = useT();
   return (
@@ -20,6 +23,7 @@ export function VehicleTable({ label, vehicles, selected, onSelect }: {
       selectionMode={onSelect ? 'single' : 'none'}
       selectionBehavior="replace"
       disallowEmptySelection
+      disabledKeys={locked ? vehicles.map((v) => v.plate) : undefined}
       selectedKeys={selected ? [selected] : []}
       onSelectionChange={onSelect ? (keys) => {
         if (keys === 'all') return;
@@ -42,7 +46,7 @@ export function VehicleTable({ label, vehicles, selected, onSelect }: {
             { key: 'fuel', n: clampPct(v.fuel) },
           ];
           return (
-            <Table.Row id={v.plate} className={onSelect ? 'cursor-pointer' : undefined}>
+            <Table.Row id={v.plate} className={cx(onSelect && !locked && 'cursor-pointer', dimmed && 'opacity-70')}>
               <Table.Cell>
                 <div className="flex flex-col gap-1">
                   <span className="truncate font-display text-lg font-semibold text-primary">{v.label}</span>

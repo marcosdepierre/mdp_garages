@@ -29,7 +29,7 @@ export interface Vehicle {
   label: string;
   state: VehicleState;
   /** 0-100 */ fuel: number;
-  /** 0-1000 */ engine: number;
+  /** GTA engine health: nominally 0-1000 but may be negative (down to -4000); the NUI clamps to 0..1000. */ engine: number;
   /** 0-1000 */ body: number;
   mileage: number;
   mileage_unit: 'km' | 'mi';
@@ -39,7 +39,8 @@ export interface Vehicle {
   /** state 3 only */ impound?: ImpoundInfo;
 }
 
-export interface OpenData { garage: Garage; vehicles: Vehicle[] }
+/** Phase 1: `vehicles` may be omitted → the NUI fetches them via the 'getVehicles' callback (loading/error states). */
+export interface OpenData { garage: Garage; vehicles?: Vehicle[] }
 
 // Lua → NUI
 /** UI strings from Lua `UILocale()` (Locales.<lang>.ui). Missing keys fall back to English. */
@@ -47,9 +48,13 @@ export type LocaleTable = Record<string, string>;
 
 export type NuiMessage =
   /** `plate` (optional, proposed): vehicle to show when view = 'detail'. */
-  | { action: 'open'; view: ViewName; data: OpenData; locale?: LocaleTable; plate?: string }
+  | { action: 'open'; view: ViewName; data: OpenData; locale?: LocaleTable; plate?: string; lang?: string }
   | { action: 'update'; data: Partial<OpenData>; view?: ViewName; plate?: string }
-  | { action: 'close' };
+  | { action: 'close' }
+  /** Phase 1 (client/main.lua UI.Toast): toast without opening the panel. Same `id` replaces the previous toast. */
+  | { action: 'toast'; id?: string; kind: ToastKind; titleKey?: string; title?: string; description?: string; error?: string; locale?: LocaleTable; lang?: string };
+
+export type ToastKind = 'loading' | 'success' | 'error' | 'warning' | 'info';
 
 // NUI → Lua
 export const NUI_ERROR_CODES = [

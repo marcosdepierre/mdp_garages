@@ -15,7 +15,7 @@ function UI.Open(view, data, plate)
         print('^3[mdp_garages] OpenGarageUI called without data.garage, not opening^0')
         return false
     end
-    SendNUIMessage({ action = 'open', view = view or 'list', data = data or {}, plate = plate, locale = Utils.UILocale() })
+    SendNUIMessage({ action = 'open', view = view or 'list', data = data or {}, plate = plate, locale = Utils.UILocale(), lang = Config.Locale })
     SetNuiFocus(true, true)
     if not UI.open then
         UI.open = true
@@ -34,7 +34,18 @@ function UI.Close()
     setClosed()
 end
 
+--- Phase 1: toast feedback in the NUI (works without NUI focus; panel may be closed).
+--- kind = 'loading' | 'success' | 'error'; id groups loading -> result (same toast is replaced).
+--- titleKey: ui locale key (NUI translates); title/description: already-translated text; error: contract error code.
+function UI.Toast(t)
+    if type(t) ~= 'table' then return end
+    SendNUIMessage({ action = 'toast', id = t.id, kind = t.kind, titleKey = t.titleKey, title = t.title,
+        description = t.description, error = t.error and Utils.ErrorCode(t.error) or nil,
+        locale = Utils.UILocale(), lang = Config.Locale })
+end
+
 exports('OpenGarageUI', UI.Open)
+exports('GarageToast', UI.Toast)
 exports('UpdateGarageUI', UI.Update)
 exports('CloseGarageUI', UI.Close)
 

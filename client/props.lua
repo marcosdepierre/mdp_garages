@@ -23,7 +23,8 @@ end)
 
 -- Optional hook (Integrations, client-local): props applied for netId. Not awaited by any UI flow.
 AddEventHandler('mdp_garages:client:propsApplied', function(netId, ok)
-    -- TODO(phase1, Backend/Integrations): nothing to do in the UI yet; take-out success toast never waits on this.
+    -- Fires exactly once per vehicle with the FINAL result (Integrations 4bf7b64/ac77923; ok=false immediately
+    -- on some failures or after ~10 s timeout). Informational only: the take-out success toast never waits on it.
 end)
 
 -- Odometer: km driven per plate while we drive it.

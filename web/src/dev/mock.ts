@@ -13,7 +13,7 @@ export const vehicles: Vehicle[] = [
   { plate: 'MDP001', model: 'sultan', label: 'Karin Sultan', state: VehicleState.Garaged, fuel: 82, engine: 1000, body: 980, mileage: 1520.4, mileage_unit: 'km', garage_id: 'public:legion', is_owner: true },
   { plate: 'MDP002', model: 'adder', label: 'Truffade Adder', state: VehicleState.Out, fuel: 40, engine: 750, body: 600, mileage: 8803, mileage_unit: 'km', garage_id: null, is_owner: true, coords: { x: 215.8, y: -810.1, z: 30.7 } },
   { plate: 'KEY 42', model: 'bati', label: 'Pegassi Bati 801', state: VehicleState.Garaged, fuel: 100, engine: 1000, body: 1000, mileage: 120, mileage_unit: 'km', garage_id: 'public:legion', is_owner: false },
-  { plate: 'LS 8X 88', model: 'blista', label: 'Dinka Blista', state: VehicleState.ParkedWorld, fuel: 55, engine: 900, body: 870, mileage: 302, mileage_unit: 'km', garage_id: null, is_owner: true, coords: { x: -45.2, y: -1100.3, z: 26.4 } },
+  { plate: 'LS 8X 88', model: 'blista', label: 'Dinka Blista', state: VehicleState.ParkedWorld, fuel: 55, engine: -350, /* negative health (wrecked) → 0% */ body: 870, mileage: 302, mileage_unit: 'km', garage_id: null, is_owner: true, coords: { x: -45.2, y: -1100.3, z: 26.4 } },
   { plate: 'MDP005', model: 'futo', label: 'Karin Futo', state: VehicleState.Impounded, fuel: 15, engine: 420, body: 300, mileage: 40110, mileage_unit: 'km', garage_id: 'impound:lspd', is_owner: true, impound: { reason: 'Illegal parking', fee: 500, release_after: now + 1800 } },
   { plate: 'OLD 77', model: 'emperor', label: 'Albany Emperor', state: VehicleState.Retired, fuel: 30, engine: 800, body: 750, mileage: 65230, mileage_unit: 'km', garage_id: null, is_owner: true },
 ];
@@ -23,8 +23,9 @@ export const vehiclesFor = (garageId: string) =>
 
 export const mockOpen = (garage: Garage = garages[0]): OpenData => ({ garage, vehicles: vehiclesFor(garage.id) });
 
+const failedOnce = new Set<string>();
 export async function mockNui(event: string, data: unknown): Promise<NuiResponse> {
-  await new Promise((r) => setTimeout(r, 250));
+  await new Promise((r) => setTimeout(r, event === 'close' ? 150 : 600)); // visible loading states
   const d = (data ?? {}) as Record<string, string>;
   switch (event) {
     case 'close': return { ok: true };
@@ -36,6 +37,8 @@ export async function mockNui(event: string, data: unknown): Promise<NuiResponse
       const v = vehicles.find((x) => x.plate === d.plate);
       if (!v) return { ok: false, error: 'not_owner' };
       if (v.state === VehicleState.Retired) return { ok: false, error: 'retired' };
+      // dev: 'KEY 42' fails once with a retryable code (§9.4), then succeeds
+      if (v.plate === 'KEY 42' && !failedOnce.has(v.plate)) { failedOnce.add(v.plate); return { ok: false, error: 'spawn_failed' }; }
       if (v.state === VehicleState.Impounded) return { ok: false, error: 'impounded' };
       if (v.state !== VehicleState.Garaged && v.state !== VehicleState.ParkedWorld) return { ok: false, error: 'already_out' };
       return { ok: true, data: { netId: 1000 + Math.floor(Math.random() * 9000) } };
@@ -47,4 +50,4 @@ export async function mockNui(event: string, data: unknown): Promise<NuiResponse
 /** N15: dev mock is English only; the full table comes from the EN fallback (= locales/en.lua). */
 export const mockLocale: Record<string, string> = {};
 export const mockOpenMessage = (garage: Garage = garages[0], view: 'list' | 'detail' = 'list', plate?: string): NuiMessage =>
-  ({ action: 'open', view, data: mockOpen(garage), locale: mockLocale, plate });
+  ({ action: 'open', view, data: mockOpen(garage), locale: mockLocale, plate, lang: 'es' }); // es → es-ES number format (§8.3)

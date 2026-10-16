@@ -1,13 +1,15 @@
-import type { ReactNode } from 'react';
+import type { FC, ReactNode } from 'react';
 import { Car01 } from '@untitledui/icons';
 import { EmptyState } from '@/components/application/empty-state/empty-state';
 
-/** Untitled UI EmptyState (design-system §4.6: Featured icon gray + Car01). */
-export function Empty({ title, description, footer }: { title: string; description?: string; footer?: ReactNode }) {
+/** Untitled UI EmptyState (design-system §11): size md, circle pattern, FeaturedIcon (gray by default). */
+export function Empty({ title, description, footer, icon = Car01, color = 'gray' }: {
+  title: string; description?: string; footer?: ReactNode; icon?: FC<{ className?: string }>; color?: 'gray' | 'error';
+}) {
   return (
     <EmptyState size="md" className="py-10">
       <EmptyState.Header pattern="circle">
-        <EmptyState.FeaturedIcon icon={Car01} color="gray" />
+        <EmptyState.FeaturedIcon icon={icon} color={color} />
       </EmptyState.Header>
       <EmptyState.Content>
         <EmptyState.Title>{title}</EmptyState.Title>

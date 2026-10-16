@@ -78,3 +78,10 @@ files {
     'web/dist/**/*',
 }
 ```
+
+## Phase 1
+- NUI messages: `open` (may omit `vehicles` → NUI calls `getVehicles`; optional `lang`), `update`, `close`, `toast` `{id, kind: loading|success|error|warning|info, titleKey?, title?, description?, error?, locale?, lang?}` (sent by Lua `exports.mdp_garages:GarageToast`).
+- Take-out (§9): button spinner, rows/close/ESC locked while loading; success toast; error toast + inline alert with Retry for retryable codes only.
+- Engine/body health clamped to 0..1000 before % (engine may be negative).
+- Dev: `?view=detail&plate=…&garage=impound:lspd`, `?fetch=1`; `KEY 42` fails once with `spawn_failed`.
+- e2e: `npm run test:e2e` (n16, r5-flows, phase1).
