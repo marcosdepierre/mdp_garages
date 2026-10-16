@@ -81,7 +81,7 @@ end
 --- Owner-change handling: revoke all keys of the plate and log (QA N3).
 --- P1-OWN-H1: revoke every key (mdp table + keys resource for the online seller); a live tracked entity stays
 --- tracked and is claimed by the buyer if online.
-local function onOwnerChanged(plate, oldOwner, newOwner)
+local function onOwnerChanged(plate, oldOwner, newOwner, via)
     local okD, errD = pcall(MySQL.update.await, 'DELETE FROM mdp_vehicle_keys WHERE plate = ?', { plate })
     if not okD then print(('^1[mdp_garages] %s: clearing shared keys after transfer failed: %s^0'):format(plate, tostring(errD))) end
     local ent = Security.GetSpawnedEntity(plate)
@@ -94,19 +94,20 @@ local function onOwnerChanged(plate, oldOwner, newOwner)
         end
     end
     if ent and buyerSrc then pcall(Security.ClaimSpawn, plate, buyerSrc) end
-    print(('^3[mdp_garages] owner of %s changed %s -> %s; keys revoked%s^0'):format(plate, tostring(oldOwner), tostring(newOwner),
-        ent and ' (entity stays tracked under the buyer)' or ''))
+    -- TR-5: audit every transfer (never logs the entity mark or secret)
+    Security.Log('AUDIT', 'transfer', 'owner changed', { plate = plate, old = tostring(oldOwner), new = tostring(newOwner),
+        via = via or 'lock', entity = ent and 'tracked_under_buyer' or 'none' })
 end
 Vehicles.OnOwnerChanged = onOwnerChanged
 
 --- P1-OWN-H1: transfers apply immediately in every live state (not only garaged/parked). Returns true if applied.
 --- TR-1: runs under WithLock(plate) unless the caller already holds it (opts.locked).
-function Vehicles.ApplyTransfer(plate, oldOwner, newOwner, locked)
+function Vehicles.ApplyTransfer(plate, oldOwner, newOwner, locked, via)
     if type(newOwner) ~= 'string' or newOwner == '' or oldOwner == newOwner then return false end -- TR-5 no-op guard
     local function apply()
         local ok, n = pcall(MySQL.update.await, 'UPDATE mdp_vehicles SET owner = ? WHERE plate = ? AND owner = ? AND state <> ?',
             { newOwner, plate, oldOwner, VS.REMOVED })
-        if ok and n == 1 then onOwnerChanged(plate, oldOwner, newOwner) return true end
+        if ok and n == 1 then onOwnerChanged(plate, oldOwner, newOwner, via) return true end
         return false
     end
     if locked then return apply() end
@@ -194,7 +195,7 @@ function Vehicles.InsertBatch(rows, opts)
                 for n = 1, 10 do params[base + n] = vals[n] end
             elseif e.owner ~= r.owner then
                 -- P1-OWN-H1: applied immediately, even when OUT (entity stays tracked under the buyer)
-                if Vehicles.ApplyTransfer(r.plate, e.owner, r.owner) then transferred = transferred + 1 end
+                if Vehicles.ApplyTransfer(r.plate, e.owner, r.owner, false, 'sync') then transferred = transferred + 1 end
             end
         end
         if #ph > 0 then
@@ -304,7 +305,7 @@ function Vehicles.SyncRemovals(tbl, ownerCol, owner, frameworkRows)
                 if other and other ~= owner then
                     local n = MySQL.update.await("UPDATE mdp_vehicles SET owner = ? WHERE plate = ? AND owner = ? AND source = 'framework' AND state IN (?, ?)",
                         { other, plate, owner, VS.GARAGED, VS.PARKED_WORLD })
-                    if n == 1 then onOwnerChanged(plate, owner, other) end
+                    if n == 1 then onOwnerChanged(plate, owner, other, 'sync') end
                     return
                 end
                 local ent = Security.GetSpawnedEntity(plate)
@@ -380,7 +381,7 @@ function Vehicles.AddVehicle(owner, plate, model, props, garageId)
         return true, 'restored'
     elseif old ~= owner then
         -- P1-OWN-H1: transfer applies in every live state
-        if not Vehicles.ApplyTransfer(plate, old, owner) then return false, 'transfer_failed' end
+        if not Vehicles.ApplyTransfer(plate, old, owner, false, 'add') then return false, 'transfer_failed' end
     end
     -- also sync the owner's other framework vehicles if they are online (QA N7)
     local src = Vehicles.FindSourceByIdentifier and Vehicles.FindSourceByIdentifier(owner)

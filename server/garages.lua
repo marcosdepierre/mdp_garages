@@ -97,7 +97,7 @@ local function checkFrameworkOwner(src, plate, mdpOwner, evName)
     end
     if fwOwner and fwOwner ~= mdpOwner then
         Security.LogReject(src or 0, evName, 'framework_owner_mismatch', { plate = plate })
-        MDP.Vehicles.ApplyTransfer(plate, mdpOwner, fwOwner, true) -- caller holds the plate lock
+        MDP.Vehicles.ApplyTransfer(plate, mdpOwner, fwOwner, true, 'lock') -- caller holds the plate lock
         return false, 'not_owner'
     end
     return true
@@ -353,9 +353,9 @@ local function adoptUnmarked(ent, plate, opts)
     end
     MDP.Props.StampMileage(plate)
     local c = GetEntityCoords(ent)
-    print(('[mdp_garages] AUDIT adopt %s: src=%s ident=%s plate=%s model=%s netId=%d coords=%.1f,%.1f,%.1f invoker=%s')
-        :format(opts.evName, tostring(src), tostring(src and Bridge.GetIdentifier(src)), plate, tostring(row.model),
-            netId, c.x, c.y, c.z, tostring(opts.invoker)))
+    Security.Log('AUDIT', 'adopt', 'vehicle adopted', { event = opts.evName, src = tostring(src),
+        ident = tostring(src and Bridge.GetIdentifier(src)), plate = plate, model = tostring(row.model), netId = netId,
+        coords = ('%.1f,%.1f,%.1f'):format(c.x, c.y, c.z), invoker = tostring(opts.invoker) })
     return true
 end
 
@@ -576,8 +576,8 @@ RegisterCommand('mdp_regularize', function(src, args)
             { VS.GARAGED, gid, plate, VS.REMOVED })
         MDP.Streamer.Forget(plate)
         MDP.Props.Hook(Bridge.FrameworkSync, 'OnStore', plate, gid)
-        print(('[mdp_garages] mdp_regularize by %s: %s -> GARAGED in %s (%d unmarked entities deleted, previous state %s)')
-            :format(src == 0 and 'console' or tostring(src), plate, gid, deleted, tostring(row.state)))
+        Security.Log('AUDIT', 'regularize', 'vehicle regularized', { by = src == 0 and 'console' or tostring(src),
+            plate = plate, garage = gid, deleted = deleted, prev_state = tostring(row.state) })
         reply(('%s regularized -> %s'):format(plate, gid))
     end)
 end, true) -- restricted: add_ace group.admin command.mdp_regularize allow
@@ -614,7 +614,7 @@ end
 
 local function SpawnOwnedVehicle(plate, coords, src)
     local invoker = GetInvokingResource()
-    print(('[mdp_garages] SpawnOwnedVehicle called by %s (plate %s, src %s)'):format(tostring(invoker), tostring(plate), tostring(src)))
+    Security.Log('AUDIT', 'dealership', 'SpawnOwnedVehicle called', { invoker = tostring(invoker), plate = tostring(plate), src = tostring(src) })
     if not isTrusted(invoker) then return nil, 'untrusted_resource', untrustedMsg(invoker) end
     if not MDP.Ready then return nil, 'not_ready' end
     plate = type(plate) == 'string' and Utils.NormalizePlate(plate) or nil
@@ -669,7 +669,7 @@ exports('SpawnOwnedVehicle', SpawnOwnedVehicle)
 local externalRate = {}
 local function RegisterExternalVehicle(netId, plate)
     local invoker = GetInvokingResource()
-    print(('[mdp_garages] RegisterExternalVehicle called by %s (netId %s, plate %s)'):format(tostring(invoker), tostring(netId), tostring(plate)))
+    Security.Log('AUDIT', 'dealership', 'RegisterExternalVehicle called', { invoker = tostring(invoker), netId = tostring(netId), plate = tostring(plate) })
     if not isTrusted(invoker) then return false, 'untrusted_resource', untrustedMsg(invoker) end
     -- own rate limit: 10 calls per 60 s per resource
     local now = GetGameTimer()

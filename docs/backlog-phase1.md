@@ -22,9 +22,11 @@
 | Odómetro | Abierto | km acumulados solo en el cliente conductor; si cambia de conductor sin store/park se pierde el tramo. |
 | Km primer guardado | Aceptado (Senior) | Coches añadidos por otros scripts (p.ej. concesionarios) no tienen hora registrada en su primer guardado: solo aplica el margen de 0,5 km (mitigado en parte por el fallback a `parked_at`/`updated_at` de la BD, N5). |
 | Llaves compartidas (fase 3) | Pendiente | Hoy guardar/aparcar es solo del dueño; las llaves compartidas solo sirven para conducir. `Config.AllowSharedKeyStore` (false) reservado para decidir en fase 3. |
-| TR-3 (fase 2) | Pendiente | DELETE de llaves y UPDATE de dueño en una transacción (hoy el error se registra en el log). |
+| TR-3 (fase 2) | Pendiente | DELETE de llaves y UPDATE de dueño en una sola transacción (hoy el error del DELETE se registra en el log). |
+| P1-OWN-M1 RECUPERAR (fase 2) | Pendiente | Diseño de Security: comando/acción de recuperar para coche OUT; requiere fila OUT + dueño + `IsOwner(src, plate, false)`; escaneo del pool por matrícula; borrar copias sin marca vacías o rechazar si alguna está ocupada; cobrar tarifa; spawn nuevo marcado con props de la BD; log AUDIT; cooldown por matrícula. |
+| R7-3 (fase 2) | Pendiente | `AddVehicle` con el lock de la matrícula ocupado debe devolver `busy`, no `transfer_failed`. |
+| AD-1 (fase 2) | Pendiente | `Config.AllowFirstStoreAdoption` vale `true` por defecto (decisión de Senior); Security recomienda `false` antes del release (re-revisión 5, rebajado a Bajo). Revisar el valor por defecto en fase 2. |
 | TR-4 (fase 2) | Parcial | Varias filas del framework para una matrícula: hoy se omite el chequeo y no se transfiere (log). Falta una herramienta de admin para resolverlo. |
-| TR-5 (fase 2) | Parcial | Guard old == new hecho. Falta log AUDIT de cada transferencia (dueño antiguo, nuevo, origen) con un helper de Security. |
 | R2-M2 (fase 2) | Pendiente | Diferido por Senior a fase 2 (ver docs/qa-review-phase1-backend.md). |
 | R2-L1 (Baja) | Pendiente | `FrameworkOwner`: una matrícula del framework con doble espacio interno no coincide con la normalizada (búsqueda indexada exacta). |
 | R3-L (índice QB) | Pendiente | Comprobar/recomendar índice en `player_vehicles.plate` (QB/Qbox) para la búsqueda indexada; ESX `owned_vehicles.plate` es PK. |
@@ -157,7 +159,7 @@ Cerrados: P1-OWN-H1, P1-OWN-H2 (Altas, ver review), M2, M5 y L1. L3 parcial. Sig
 | P1F-R4-L1 | Baja | web/README.md:89-95, docs/release-notes.md:32-33, README.md | `ox:callbackTimeout` solo está en la guía de la NUI y contradice release-notes ("opcional, súbelo"); es un convar global de ox_lib. | Decidir recomendado u opcional y documentarlo en el README raíz (server.cfg) y en release-notes, coherente; corregir "súbelo" por "bájalo". |
 
 ## Desde QA Propiedad R3 (16/10/2026, 2b60c36)
-Cerrados: R2-M1, R2-M3, M5 (fail-closed sin columna de fecha). Parcial: R2-L2. Aplazados a fase 2: R2-M2 y TR-3..TR-5 (Backend). Siguen abiertos: R2-L1, M1, M3, M4.
+Cerrados: R2-M1, R2-M3, M5 (fail-closed sin columna de fecha). Parcial: R2-L2. Aplazados a fase 2: R2-M2, TR-3 y TR-4 (Backend); TR-5 hecho (Security.Log AUDIT). Siguen abiertos: R2-L1, M1, M3, M4.
 
 | # | Severidad | Archivo:línea (2b60c36) | Descripción | Arreglo |
 |---|---|---|---|---|
