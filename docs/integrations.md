@@ -388,49 +388,82 @@ Este es el **único applier**: el de `client/props.lua` (Backend) se elimina. El
 
 ## Concesionarios
 
-mdp_garages solo deja guardar o aparcar vehículos **marcados por el servidor** (`Security.MarkServerEntity`). Si un concesionario hace el spawn por su cuenta, ese coche no se puede guardar. Hay tres formas de integrarlo, de más a menos recomendada.
+mdp_garages solo deja guardar o aparcar vehículos **marcados por el servidor** (`Security.MarkServerEntity`). Un coche que el concesionario crea por su cuenta no se puede guardar, salvo por las vías 2 y 3. **Orden de preferencia: `SpawnOwnedVehicle` > `RegisterExternalVehicle` > adopción en el primer guardado.**
 
-### Exports de mdp (servidor)
-| Export | Firma | Retorno | Estado |
-|---|---|---|---|
-| `AddVehicle` | `exports.mdp_garages:AddVehicle(owner, plate, model, props?, garageId?)`. `owner` = identificador del framework (citizenid en qb/qbx, `xPlayer.getIdentifier()` en ESX). `garageId = 'out'` crea la fila en OUT; cualquier otro garaje, en GARAGED; `nil`, en el garaje por defecto | `ok:boolean, err?` (`invalid_owner`, `invalid_plate`, `invalid_model`, `invalid_props`, `plate_exists`, `db_error`) | ✅ `server/vehicles.lua:245-308` |
-| `SpawnOwnedVehicle` | `exports.mdp_garages:SpawnOwnedVehicle(plate, coords vector4, src)` | `netId` o `nil, err` (`invalid_plate`, `invalid_coords`, `invalid_source`, `rate_limited` (3 cada 10 s), `not_ready`, `not_owned_vehicle`, `not_owner`, `invalid_state`, `already_out`, `spawn_failed`, `locked`) | ✅ `server/garages.lua:421-478` (commit 53c2c56) |
-| `RegisterExternalVehicle` | `exports.mdp_garages:RegisterExternalVehicle(netId, plate, src?)` | `ok, err?`, según la implementación de Backend | ⚠️ Aprobado, pero el export todavía no está en el repo. Hoy solo existe `Security.RegisterExternalVehicle` (`server/security.lua:680-712`), con los errores `invalid_request`, `invalid_entity`, `plate_mismatch`, `already_marked`, `tracked_other_plate`, `already_tracked`, `not_found`, `wrong_state`, `model_mismatch` |
+### Exports (servidor, solo se pueden llamar desde otro recurso)
+**`AddVehicle`**: `exports.mdp_garages:AddVehicle(owner, plate, model, props?, garageId?) -> ok, err?` (`server/vehicles.lua:245-308`)
+- `owner` = identificador del framework (citizenid en qb/qbx, `xPlayer.getIdentifier()` en ESX).
+- `garageId = 'out'` crea la fila en OUT (necesario para las vías 1, 2 y 3); otro valor la crea en GARAGED en ese garaje; `nil`, en el garaje por defecto.
+- La fila se crea con `managed_at` NULL, así que es adoptable. Las filas que llegan por import desde las tablas del framework se crean con `managed_at` ya fijado y **nunca son adoptables**.
+- Errores: `invalid_owner`, `invalid_plate`, `invalid_model`, `invalid_props`, `plate_exists`, `db_error`.
 
-`SpawnOwnedVehicle` sigue el mismo flujo que sacar un vehículo del garaje:
-- bloquea la matrícula, relee la fila y comprueba que `owner` sea el identificador de `src`;
-- el estado tiene que ser GARAGED, u OUT sin entidad;
-- marca la entidad en el servidor, la registra (`TrackSpawn`), pide aplicar las props (`Bridge.Props.RequestApply`) y fija el combustible;
-- da las llaves (`Bridge.Keys.GiveKeys`), sincroniza con la tabla del framework (`FrameworkSync.OnSpawn`) y deshace el cambio de estado si algo falla.
+**`SpawnOwnedVehicle`** (commit 53c2c56): `exports.mdp_garages:SpawnOwnedVehicle(plate, coords, src) -> netId | nil, err`
+- `coords`: `vector3`/`vector4` o `{x, y, z, w?}`.
+- Mismo flujo que sacar del garaje: lock; `owner` = identificador de `src`; estado GARAGED, u OUT sin entidad; marca, `TrackSpawn`, `RequestApply` de las props, combustible, llaves, `FrameworkSync`; rollback si falla.
+
+| Error | Significado |
+|---|---|
+| `invalid_plate` | matrícula vacía o no válida |
+| `invalid_coords` | coords no numéricas, infinitas o fuera del mapa |
+| `invalid_source` | `src` no está conectado o no tiene identificador, o la llamada no viene de otro recurso |
+| `rate_limited` | más de 3 llamadas en 10 s por jugador |
+| `not_ready` | mdp todavía arrancando |
+| `not_owned_vehicle` | no hay fila en `mdp_vehicles` (o está en REMOVED) |
+| `not_owner` | el dueño de la fila no es `src` |
+| `invalid_state` | ni GARAGED ni OUT |
+| `already_out` | ya hay una entidad trackeada con esa matrícula |
+| `spawn_failed` | no se pudo crear la entidad (estado restaurado) |
+| `locked` | la matrícula está bloqueada por otra operación |
+
+**`RegisterExternalVehicle`** (commit 7de0844): `exports.mdp_garages:RegisterExternalVehicle(netId, plate) -> true | false, err`
+- Requisitos:
+  - el recurso que llama está en `Config.TrustedResources` (vacío por defecto = export desactivado);
+  - la fila se creó hace **< 60 s** (llamar a `AddVehicle(..., 'out')` justo antes);
+  - estado OUT y fila no gestionada todavía;
+  - entidad sin marcar y sin trackear, y ninguna otra entidad con esa matrícula;
+  - la matrícula visible y el modelo coinciden con la fila;
+  - entidad de script (population type 7).
+- No da llaves ni aplica props: de eso se encarga el concesionario.
+
+| Error | Significado |
+|---|---|
+| `untrusted_resource` | el recurso que llama no está en `Config.TrustedResources` (o es mdp) |
+| `not_ready` | mdp todavía arrancando |
+| `invalid_plate` | matrícula no válida |
+| `invalid_request` | `netId` no corresponde a un vehículo existente |
+| `not_owned_vehicle` | no hay fila (o está en REMOVED) |
+| `invalid_state` | la fila no está en OUT |
+| `vehicle_mismatch` | ya gestionado, fuera de la ventana de 60 s, ya marcado o trackeado, matrícula duplicada o distinta, modelo distinto o entidad que no es de script |
+| `locked` | matrícula bloqueada |
+
+**Adopción en el primer guardado** (fallback si el concesionario no se modifica): `Config.AllowFirstStoreAdoption = true` (valor por defecto).
+- Al primer guardado, el dueño (que debe ir conduciendo) adopta un coche sin marcar.
+- La fila tiene que estar en OUT, no haber sido gestionada nunca y tener **menos de 30 min**. Límite: 3 adopciones cada 10 min por jugador, con log de auditoría.
+- ⚠️ **Hoy solo funciona con filas creadas con `AddVehicle`.** Las filas escritas directamente en `player_vehicles`/`owned_vehicles` llegan por import con `managed_at` fijado y no son adoptables, a la espera de la revisión de Security. Un concesionario sin modificar que **no** llame a `AddVehicle` todavía no queda cubierto.
 
 ### 1) Recomendado: `AddVehicle` + `SpawnOwnedVehicle`
-El concesionario mantiene **su INSERT en la tabla del framework** (para que otros recursos lo vean) y además:
-1. llama a `AddVehicle(owner, plate, model, nil, 'out')`, porque `SpawnOwnedVehicle` exige la fila en `mdp_vehicles` y no hay que esperar al import de la siguiente carga del jugador;
-2. **sustituye su spawn** por `SpawnOwnedVehicle`. Las llaves, las props y el combustible los gestiona mdp.
+El concesionario mantiene su INSERT en la tabla del framework y, además, llama a `AddVehicle(owner, plate, model, nil, 'out')` y **sustituye su spawn** por `SpawnOwnedVehicle`. Las llaves, las props y el combustible los pone mdp.
 
-### 2) Alternativa sin spawn: entrega en garaje
-`AddVehicle(owner, plate, model, props, '<garageId>')` deja el coche en GARAGED en ese garaje, y el jugador lo saca desde la NUI. Basta con quitar el spawn del concesionario.
+### 1b) Sin spawn: entrega en garaje
+`AddVehicle(owner, plate, model, props, '<garageId>')`, y el jugador lo saca desde la NUI.
 
-### 3) Secundario: `RegisterExternalVehicle` (concesionarios que hacen el spawn ellos mismos)
-Aprobado por Security, con estas condiciones (según la implementación de Backend):
-- el recurso que llama está en `Config.TrustedResources` (se comprueba con `GetInvokingResource()`); la lista está vacía por defecto;
-- la matrícula y el modelo coinciden con `mdp_vehicles`;
-- la fila se creó hace menos de 60 s;
-- el estado es OUT y no hay entidad;
-- la entidad no está ya marcada.
-
+### 2) Secundario: `RegisterExternalVehicle` (el concesionario hace el spawn)
 ```lua
--- shared/config.lua (dueño del servidor): nombre exacto del recurso del concesionario
+-- shared/config.lua (dueño del servidor): nombre EXACTO del recurso del concesionario
 Config.TrustedResources = { 'qbx_vehicleshop' }
 ```
-Llamada justo después del INSERT y del spawn propios del concesionario:
 ```lua
-local ok, err = exports.mdp_garages:AddVehicle(citizenid, plate, model, nil, 'out')
--- ... spawn propio del concesionario -> netId ...
-local okR, errR = exports.mdp_garages:RegisterExternalVehicle(netId, plate, src)
-if not okR then print(('[shop] mdp RegisterExternalVehicle %s: %s'):format(plate, tostring(errR))) end
+-- en el concesionario, justo después de su INSERT y de SU spawn (antes de 60 s desde AddVehicle):
+local okA, errA = exports.mdp_garages:AddVehicle(citizenid, plate, model, nil, 'out')
+if not okA and errA ~= 'plate_exists' then print(('[shop] mdp AddVehicle %s: %s'):format(plate, errA)) end
+-- ... spawn propio del concesionario (CreateVehicleServerSetter / qbx.spawnVehicle) -> netId ...
+local ok, err = exports.mdp_garages:RegisterExternalVehicle(netId, plate)
+if not ok then print(('[shop] mdp RegisterExternalVehicle %s: %s'):format(plate, err)) end
 ```
-Con esta opción, el concesionario da las llaves y aplica las props por su cuenta.
+Si `errA == 'plate_exists'` porque la fila ya era antigua, la ventana de 60 s no se cumple y el resultado será `vehicle_mismatch`.
+
+### 3) Último recurso: adopción en el primer guardado
+No hay que tocar el concesionario más allá de llamar a `AddVehicle(owner, plate, model, nil, 'out')`. El jugador guarda el coche en menos de 30 min conduciéndolo.
 
 ---
 
@@ -508,4 +541,4 @@ end
 `model` es el string del modelo que recibe el callback y `plate` lo genera el servidor (`generateServerPlate`, l.376), así que es fiable.
 
 ### Otros concesionarios
-- **jg-dealerships**, **okokVehicleShop**: son de pago o escrow. No he verificado públicamente sus puntos de enganche (archivo/función de compra y spawn). ⚠️ Pendiente. Si exponen un hook de "vehículo comprado" en el servidor, aplica el patrón 1 (`AddVehicle` + `SpawnOwnedVehicle`). Si solo hacen el spawn ellos mismos, el patrón 3 (`RegisterExternalVehicle` + `Config.TrustedResources`).
+- **jg-dealerships**, **okokVehicleShop**: son de pago o escrow. No he verificado públicamente sus puntos de enganche (archivo/función de compra y spawn). ⚠️ Pendiente. Si exponen un hook de "vehículo comprado" en el servidor, aplica el patrón 1 (`AddVehicle` + `SpawnOwnedVehicle`). Si solo hacen el spawn ellos mismos, el patrón 2 (`RegisterExternalVehicle` + `Config.TrustedResources`) o, como último recurso, la adopción en el primer guardado.
