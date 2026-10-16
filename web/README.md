@@ -40,7 +40,7 @@ Add components: `npx untitledui@latest add <name> -y` (FREE only; Alerts, Sectio
 4 approved local patches — see `UNTITLEDUI_PATCHES.md` and `patches/untitledui/`.
 
 ## Tests
-`tests/n16-row-select.mjs` (playwright-core + system Chrome, mock mode): `npx vite --port 5190 & BASE_URL=http://localhost:5190 npm run test:e2e`. Not part of the build.
+`npm run test:e2e` → `tests/run-e2e.mjs` starts Vite (mock mode) on a free port and runs every `tests/*.e2e.mjs` (playwright-core + system Chrome; `CHROME_PATH` to override). CI-ready (non-zero exit on failure). Not part of the build.
 
 ## Behaviour / API
 - `fetchNui<E>(event, data): Promise<{ ok, error?, data? }>` — POST `https://${GetParentResourceName() ?? 'mdp_garages'}/${event}`, 10 s timeout → `error:'timeout'`.

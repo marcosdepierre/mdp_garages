@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
     "preview": "vite preview",
-    "test:e2e": "node tests/n16-row-select.mjs"
+    "test:e2e": "node tests/run-e2e.mjs"
   },
   "dependencies": {
     "@react-stately/utils": "3.12.1",
