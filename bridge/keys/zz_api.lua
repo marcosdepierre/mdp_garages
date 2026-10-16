@@ -36,3 +36,16 @@ else
         return ok and r == true
     end
 end
+
+if IsDuplicityVersion() then
+    --- Store rule (Config.RemoveKeysOnStore, default true): on store to a garage (GARAGED) remove the storing
+    --- player's TEMPORARY keys from the external key resource; keep them when parked in the world (PARKED_WORLD).
+    --- Never touches mdp_vehicle_keys (phase-3 shared keys). Returns true if keys were removed.
+    function Bridge.Keys.OnStore(src, plate, newState)
+        if Config.RemoveKeysOnStore == false then return false end
+        if newState ~= Constants.VehicleState.GARAGED then return false end
+        local ok, res = pcall(Bridge.Keys.RemoveKeys, src, plate)
+        if not ok then print('^1[mdp_garages][keys] OnStore failed: ' .. tostring(res) .. '^0') return false end
+        return res == true
+    end
+end

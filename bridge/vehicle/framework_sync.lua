@@ -13,6 +13,19 @@ local function enabled()
         and (Bridge.Framework == 'qb' or Bridge.Framework == 'qbx' or Bridge.Framework == 'esx')
 end
 
+-- ESX owned_vehicles.pound: optional column, detected once (INFORMATION_SCHEMA, parameterized, cached).
+local hasPound = nil
+local function poundColumn()
+    if hasPound ~= nil then return hasPound end
+    local ok, n = pcall(MySQL.scalar.await,
+        'SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?',
+        { 'owned_vehicles', 'pound' })
+    if not ok then return false end -- don't cache errors; retry next call
+    hasPound = (tonumber(n) or 0) > 0
+    return hasPound
+end
+CreateThread(function() if Bridge.Framework == 'esx' and Config.SyncFrameworkTables then poundColumn() end end)
+
 local function log(msg) print('^3[mdp_garages][fwsync] ' .. msg .. '^0') end
 
 --- mdp state -> qb/qbx state (nil = leave column untouched: RETIRED/REMOVED/unknown)
@@ -29,7 +42,7 @@ local function int(v, lo, hi, def)
     return math.floor(math.max(lo, math.min(hi, v)) + 0.5)
 end
 
---- Mirror one vehicle. data = { state?, garage_id?, props? (table|json), fuel?, engine?, body? }
+--- Mirror one vehicle. data = { state?, garage_id?, props? (table|json), fuel?, engine?, body?, pound? (impoundId|false=NULL, ESX) }
 --- Returns true if a framework row was updated, false otherwise (disabled, not found, error).
 function Bridge.FrameworkSync.Mirror(plate, data)
     if not enabled() then return false end
@@ -48,6 +61,9 @@ function Bridge.FrameworkSync.Mirror(plate, data)
             local VS = Constants.VehicleState
             add('`stored`', data.state == VS.GARAGED and 1 or 0)
             if data.state == VS.GARAGED then add('`parking`', data.garage_id) end
+        end
+        if data.pound ~= nil and poundColumn() then
+            if data.pound == false then sets[#sets + 1] = '`pound` = NULL' else add('`pound`', tostring(data.pound)) end
         end
         if #sets == 0 then return false end
         args[#args + 1] = plate
@@ -76,6 +92,11 @@ end
 function Bridge.FrameworkSync.OnSpawn(plate)
     return Bridge.FrameworkSync.Mirror(plate, { state = Constants.VehicleState.OUT })
 end
-function Bridge.FrameworkSync.OnImpound(plate)
-    return Bridge.FrameworkSync.Mirror(plate, { state = Constants.VehicleState.IMPOUNDED })
+function Bridge.FrameworkSync.OnImpound(plate, impoundId)
+    return Bridge.FrameworkSync.Mirror(plate, { state = Constants.VehicleState.IMPOUNDED,
+        pound = (type(impoundId) == 'string' and impoundId ~= '' and #impoundId <= 60) and impoundId or nil })
+end
+--- Release from impound: ESX pound = NULL (state is mirrored by the following OnStore/OnSpawn).
+function Bridge.FrameworkSync.OnRelease(plate)
+    return Bridge.FrameworkSync.Mirror(plate, { pound = false })
 end

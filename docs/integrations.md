@@ -342,14 +342,41 @@ Adaptadores: `qbx_vehiclekeys` (entidad), `qb-vehiclekeys` (matrícula), y adem�
 |---|---|---|
 | `Bridge.Props.Get(veh)` | cliente | tabla (`lib.getVehicleProperties` + `fuelLevel` del bridge de combustible) o `nil` |
 | `Bridge.Props.Apply(veh, props|json)` | cliente | boolean (`lib.setVehicleProperties` + `SetFuel`) |
-| `Bridge.Props.Sanitize(raw, expectedPlate?)` | ambos (usar en servidor) | `tabla, json` o `nil, err` (`too_large` si supera 64 KB, `invalid_json`, `invalid_props`, `encode_failed`). Solo conserva datos planos, con profundidad ≤ 6 y strings ≤ 256; limita fuel/engine/body/tank/dirt; fuerza la matrícula del servidor |
-| Applier del statebag `mdp_props` | cliente | el dueño de red aplica las props una vez por entidad (lo fija `server/garages.lua`) |
+| `Bridge.Props.Sanitize(raw, expectedPlate?, dbRow?, entity?)` | ambos (usar en servidor). En servidor **delega en `Security.SanitizeProps`** si existe (es el único validador; lee `dbRow` de `mdp_vehicles` si no se pasa); si no existe, usa el validador local | `tabla, json` o `nil, err` (`too_large` si supera 64 KB, `invalid_json`, `invalid_props`, `encode_failed`). Solo conserva datos planos, con profundidad ≤ 6 y strings ≤ 256; limita fuel/engine/body/tank/dirt; fuerza la matrícula del servidor |
+| `Bridge.Props.RequestApply(veh, payload, src?)` | servidor | boolean. Ver «Aplicación de props dirigida por el servidor» |
 
 ### Espejo en las tablas del framework (`bridge/vehicle/framework_sync.lua`)
 Solo está activo si `Config.SyncFrameworkTables = true` y `Config.MirrorFrameworkTables ~= false`. Solo hace `UPDATE` sobre filas que ya existen, buscando por matrícula; nunca inserta ni borra. Las consultas son parametrizadas y van con pcall y log.
 | Función | Lado | Retorno |
 |---|---|---|
 | `Bridge.FrameworkSync.Mirror(plate, { state?, garage_id?, props?, fuel?, engine?, body? })` | servidor | `true` si se actualizó una fila |
-| `Bridge.FrameworkSync.OnStore(plate, garageId, props, fuel, engine, body)` / `OnSpawn(plate)` / `OnImpound(plate)` | servidor | ídem |
+| `Bridge.FrameworkSync.OnStore(plate, garageId, props, fuel, engine, body)` / `OnSpawn(plate)` / `OnImpound(plate, impoundId)` / `OnRelease(plate)` | servidor | ídem. En ESX: `pound = impoundId` al incautar y `NULL` al liberar, solo si la columna existe (se detecta una vez con `INFORMATION_SCHEMA` y se cachea) |
 
 Mapeo de estados: qb/qbx `player_vehicles.state`: OUT/PARKED_WORLD → 0, GARAGED → 1, IMPOUNDED → 2 (RETIRED/REMOVED no se tocan); también actualiza `mods`, `fuel` (entero), `engine`, `body` y `garage` cuando el vehículo se guarda. ESX `owned_vehicles`: `vehicle` = JSON de props, `stored` = 1 solo en GARAGED, y `parking` = garage_id al guardar.
+
+### Llaves al guardar
+`Config.RemoveKeysOnStore = true` (valor por defecto). La regla se aplica con `Bridge.Keys.OnStore(src, plate, newState)` (servidor):
+- si `newState == GARAGED (1)`, llama a `Bridge.Keys.RemoveKeys(src, plate)` (las llaves **temporales** del recurso externo);
+- si `PARKED_WORLD (2)`, se conservan;
+- nunca toca `mdp_vehicle_keys` (las llaves compartidas de la fase 3);
+- devuelve `true` si se quitaron las llaves.
+
+### Aplicación de props dirigida por el servidor
+| Elemento | Nombre | Dirección |
+|---|---|---|
+| Statebag de entidad | `mdp:props` (JSON o la tabla de Backend `{props, engine, body, fuel, fuelOnClient, mileage}`) | servidor → todos |
+| Ack | `mdp_garages:server:propsApplied` (netId) | dueño → servidor (net) |
+| Fallo final | `mdp_garages:client:propsApplyFailed` (netId) | servidor → jugador que hizo el spawn + dueño actual (net) |
+| Resultado local | `mdp_garages:client:propsApplied` (netId, ok) | `TriggerEvent` local en el cliente dueño. **No está en red**, no se registra como net event |
+
+Flujo:
+1. El servidor llama a `Bridge.Props.RequestApply(veh, payload, src?)`, que fija el statebag y arranca un temporizador de 5 s.
+2. El cliente que es (o pasa a ser en menos de 5 s) `NetworkGetEntityOwner` pide el control, aplica las props (`lib.setVehicleProperties`, salud del motor y la carrocería, `SetFuel` si `fuelOnClient`), envía el ack y emite el evento local con `ok`.
+3. El servidor comprueba el ack: rate limit 10 cada 5 s, netId entero y que el remitente sea el dueño actual (si no, `Security.LogReject`). Después limpia el statebag.
+4. Si no hay ack a los 5 s, el servidor reintenta una vez (pone el statebag a nil y lo vuelve a fijar, así que un dueño nuevo también ve el cambio).
+5. Si tampoco hay ack tras el reintento, registra el fallo en el log, limpia el statebag y envía `propsApplyFailed` al jugador del spawn y al dueño, que reemiten el evento local con `ok = false`.
+
+Este es el **único applier**: el de `client/props.lua` (Backend) se elimina. El odómetro ya no puede leer `mileage` del statebag, porque se limpia tras el ack; tiene que usar un statebag propio (p. ej. `mdp:mileage`).
+
+### Pendiente
+- **jaksam vehicles_keys:** no hay API de servidor verificada (solo el evento de cliente `vehicles_keys:selfGiveVehicleKeys`). Se implementará cuando haya docs o código de exports de servidor.

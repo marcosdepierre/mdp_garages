@@ -28,7 +28,7 @@ end
 
 --- Sanitize props (table or JSON string). Returns propsTable, jsonString  or nil, err.
 --- expectedPlate (optional): forces props.plate to the server plate.
-function Bridge.Props.Sanitize(raw, expectedPlate)
+local function localSanitize(raw, expectedPlate)
     local t = raw
     if type(raw) == 'string' then
         if #raw > MAX_JSON then return nil, 'too_large' end
@@ -50,7 +50,98 @@ function Bridge.Props.Sanitize(raw, expectedPlate)
     return t, enc
 end
 
-if IsDuplicityVersion() then return end
+--- Public sanitizer. On the server, when Security.SanitizeProps exists (31ffb8d) it is the single validator:
+--- dbRow {plate, model, mileage} is read from mdp_vehicles by plate when not given. Otherwise local fallback.
+---@return table|nil clean, string|nil json_or_err
+function Bridge.Props.Sanitize(raw, expectedPlate, dbRow, entity)
+    if IsDuplicityVersion() and Security and type(Security.SanitizeProps) == 'function' then
+        local t = raw
+        if type(raw) == 'string' then
+            if #raw > MAX_JSON then return nil, 'too_large' end
+            local ok, dec = pcall(json.decode, raw); t = ok and dec or nil
+        end
+        if type(t) ~= 'table' then return nil, 'invalid_props' end
+        if not dbRow and expectedPlate then
+            local ok, row = pcall(MySQL.single.await, 'SELECT plate, model, mileage FROM mdp_vehicles WHERE plate = ?', { expectedPlate })
+            dbRow = ok and row or nil
+        end
+        local ok, clean, err, encoded = pcall(Security.SanitizeProps, t, dbRow, entity)
+        if not ok then return nil, 'sanitize_error' end
+        if not clean then return nil, err end
+        return clean, encoded or json.encode(clean)
+    end
+    return localSanitize(raw, expectedPlate)
+end
+
+local BAG = 'mdp:props'           -- entity state bag (server-set, replicated)
+local ACK = 'mdp_garages:server:propsApplied'    -- client -> server (netId)
+local FAIL = 'mdp_garages:client:propsApplyFailed' -- server -> client (netId)
+local LOCAL_DONE = 'mdp_garages:client:propsApplied' -- client-local only (netId, ok); never networked
+
+if IsDuplicityVersion() then
+    ---------------------------------------------------------------------------
+    -- Server: request apply with timeout + one retry
+    ---------------------------------------------------------------------------
+    local pending = {} -- netId -> { veh, payload, tries, src, token }
+    local TIMEOUT = 5000
+
+    local function fail(netId, p)
+        pending[netId] = nil
+        print(('^1[mdp_garages][props] apply not acknowledged for netId %d after retry^0'):format(netId))
+        local targets = {}
+        if p.src then targets[p.src] = true end
+        if DoesEntityExist(p.veh) then
+            local owner = NetworkGetEntityOwner(p.veh)
+            if owner and owner > 0 then targets[owner] = true end
+            Entity(p.veh).state:set(BAG, nil, true)
+        end
+        for t in pairs(targets) do TriggerClientEvent(FAIL, t, netId) end
+    end
+
+    local function arm(netId, token)
+        SetTimeout(TIMEOUT, function()
+            local p = pending[netId]
+            if not p or p.token ~= token then return end
+            if not DoesEntityExist(p.veh) then pending[netId] = nil return end
+            if p.tries >= 2 then return fail(netId, p) end
+            p.tries = p.tries + 1
+            p.token = token + 1
+            local bag = Entity(p.veh).state
+            bag:set(BAG, nil, true)       -- re-set so the (possibly new) owner sees a change
+            bag:set(BAG, p.payload, true)
+            arm(netId, p.token)
+        end)
+    end
+
+    --- Server-driven props apply. payload = JSON string or table (Backend: {props, engine, body, fuel, fuelOnClient, mileage}).
+    --- src (optional): spawning player, notified on final failure. Returns boolean (request armed).
+    function Bridge.Props.RequestApply(veh, payload, src)
+        if not veh or veh == 0 or not DoesEntityExist(veh) then return false end
+        if payload == nil or (type(payload) == 'string' and #payload > MAX_JSON) then return false end
+        local netId = NetworkGetNetworkIdFromEntity(veh)
+        pending[netId] = { veh = veh, payload = payload, tries = 1, src = tonumber(src), token = 1 }
+        Entity(veh).state:set(BAG, payload, true)
+        arm(netId, 1)
+        return true
+    end
+
+    RegisterNetEvent(ACK, function(netId)
+        local src = source
+        if Security and Security.RateLimit and not Security.RateLimit(src, 'ev:propsApplied', 10, 5000) then return end
+        netId = math.tointeger(tonumber(netId))
+        if not netId or netId <= 0 or netId > 0xFFFF then return end
+        local p = pending[netId]; if not p then return end
+        if not DoesEntityExist(p.veh) or NetworkGetEntityOwner(p.veh) ~= src then
+            if Security and Security.LogReject then Security.LogReject(src, ACK, 'not_owner') end
+            return
+        end
+        pending[netId] = nil
+        Entity(p.veh).state:set(BAG, nil, true) -- clear: applied once
+    end)
+    return
+end
+
+
 
 ---------------------------------------------------------------------------
 -- Client
@@ -86,17 +177,54 @@ function Bridge.Props.Apply(veh, raw)
     return res ~= false
 end
 
--- Applier for server-spawned vehicles: server sets Entity(veh).state.mdp_props (JSON, replicated).
--- Only the network owner applies, once per entity (props are networked by the game after that).
-local applied = {}
-AddStateBagChangeHandler('mdp_props', nil, function(bagName, _, value)
-    if type(value) ~= 'string' then return end
-    local veh = GetEntityFromStateBagName(bagName)
-    local t = GetGameTimer() + 5000
-    while (veh == 0 or not DoesEntityExist(veh)) and GetGameTimer() < t do Wait(50); veh = GetEntityFromStateBagName(bagName) end
-    if veh == 0 or not DoesEntityExist(veh) or applied[veh] then return end
-    if NetworkGetEntityOwner(veh) ~= PlayerId() then return end
-    applied[veh] = true
-    Bridge.Props.Apply(veh, value)
-    SetTimeout(60000, function() applied[veh] = nil end)
+-- Applier (single applier; replaces client/props.lua's). Value: JSON string or Backend table
+-- { props, engine, body, fuel, fuelOnClient, mileage }. Applies when this client is (or becomes, within 5 s)
+-- NetworkGetEntityOwner; then acks to the server, which clears the bag. Emits local LOCAL_DONE(netId, ok).
+local applying = {} -- bagName -> true while a worker runs
+
+local function decode(v)
+    if type(v) == 'string' then local ok, d = pcall(json.decode, v); return ok and d or nil end
+    return type(v) == 'table' and v or nil
+end
+
+local function applyPayload(veh, v)
+    local props = v.props ~= nil and v.props or (v.model ~= nil and v or nil) -- bare props table/json also accepted
+    local ok = true
+    if props then ok = Bridge.Props.Apply(veh, props) and ok end
+    if v.engine then SetVehicleEngineHealth(veh, v.engine + 0.0) end
+    if v.body then SetVehicleBodyHealth(veh, v.body + 0.0) end
+    if v.fuel and v.fuelOnClient ~= false and Bridge.Fuel and Bridge.Fuel.Call then
+        Bridge.Fuel.Call('SetFuel', nil, veh, Bridge.FuelCommon.Clamp(v.fuel))
+    end
+    return ok
+end
+
+AddStateBagChangeHandler(BAG, nil, function(bagName, _, value)
+    if value == nil or applying[bagName] then return end
+    local v = decode(value); if not v then return end
+    applying[bagName] = true
+    CreateThread(function()
+        local deadline, veh = GetGameTimer() + 5000, 0
+        while GetGameTimer() < deadline do
+            veh = GetEntityFromStateBagName(bagName)
+            if veh ~= 0 and DoesEntityExist(veh) and NetworkGetEntityOwner(veh) == PlayerId() then
+                if NetworkHasControlOfEntity(veh) then break end
+                NetworkRequestControlOfEntity(veh)
+            end
+            Wait(100)
+        end
+        applying[bagName] = nil
+        if veh == 0 or not DoesEntityExist(veh) or NetworkGetEntityOwner(veh) ~= PlayerId() then return end -- not ours: new owner handles retry
+        local okCall, res = pcall(applyPayload, veh, v)
+        local ok = okCall and res ~= false
+        if not okCall then print('^3[mdp_garages][props] apply failed: ' .. tostring(res) .. '^0') end
+        local netId = NetworkGetNetworkIdFromEntity(veh)
+        if ok then TriggerServerEvent(ACK, netId) end -- failure: no ack -> server retries once, then FAIL
+        TriggerEvent(LOCAL_DONE, netId, ok)
+    end)
+end)
+
+RegisterNetEvent(FAIL, function(netId)
+    netId = math.tointeger(tonumber(netId)); if not netId then return end
+    TriggerEvent(LOCAL_DONE, netId, false)
 end)
