@@ -67,3 +67,79 @@ Cada entrega se revisa contra esta lista. Los fallos se reportan a Senior Develo
 - [ ] Toda la UI usa componentes de Untitled UI React (React + Tailwind + Vite), compilada en `web/dist`. Un componente hecho a mano o de otra librería cuenta como fallo.
 - [ ] `web/dist` compilado y presente; `ui_page` apunta a él.
 - [ ] Ningún `innerHTML` con datos sin escapar.
+
+---
+
+# Fase 1 — Casos de prueba (base 1d13e0e)
+
+Alcance: streamer por proximidad, guardar/aplicar props, llaves, fuel y salud al sacar, trigger de guardado en cliente, backlog de fase 1.
+Bloquean solo Críticas y Altas; Medias y Bajas van a `docs/backlog-phase1.md`.
+
+## F1-A. Streamer por proximidad (rendimiento)
+- [ ] Resmon cliente < 0.02 ms en reposo con 50+ coches aparcados en el mapa y el jugador lejos.
+- [ ] Spawn/despawn por radio con histéresis (radio de entrada < radio de salida) para evitar parpadeo en el borde.
+- [ ] El servidor decide quién es el dueño de red del spawn; dos jugadores entrando a la vez en el radio no generan dos entidades.
+- [ ] Sin `Wait(0)` en el streamer; ticks dinámicos según distancia.
+- [ ] El despawn por distancia guarda posición, props, fuel y salud antes de borrar.
+- [ ] Coche ocupado nunca se despawnea por distancia.
+- [ ] Coche movido (remolcado, empujado) actualiza su posición guardada.
+
+## F1-B. Duplicados
+- [ ] Spam de "sacar" (doble clic, macro, dos clientes del mismo jugador) → una sola entidad.
+- [ ] Dos jugadores con llave sacan/entran el mismo coche a la vez → una sola entidad.
+- [ ] Streamer + takeOut simultáneos del mismo coche aparcado (estado 2) → una sola entidad.
+- [ ] Guardar mientras el streamer lo despawnea → estado final coherente, sin entidad huérfana.
+- [ ] Matrícula duplicada en el mundo (R6-1) → no pasa a GARAGED si quedan entidades vivas.
+- [ ] Clon por otro script (misma matrícula y modelo) → no se puede guardar dos veces.
+
+## F1-C. Reinicio del recurso y del servidor
+- [ ] `restart mdp_garages` con coches aparcados (2), fuera (1→OUT) y en uso → ningún duplicado, ningún coche perdido, ocupados intactos.
+- [ ] Reinicio completo del servidor → los aparcados reaparecen en su sitio con props, fuel y salud.
+- [ ] Reinicio a mitad de un takeOut o store → se resuelve al arrancar (recovery), sin locks colgados.
+- [ ] `onResourceStop` guarda estado de todas las entidades trackeadas y limpia blips, zonas y NUI.
+- [ ] `MDP.Ready`: las peticiones antes de terminar la recuperación devuelven `not_ready`, no fallan.
+
+## F1-D. Desconexión y reconexión
+- [ ] Desconexión con el coche fuera, para cada valor de `Config.OnDisconnect` (keep, park, garage, impound) → comportamiento documentado; ocupado por otro nunca se borra.
+- [ ] Crash del cliente (sin `playerDropped` limpio) → mismo resultado que una desconexión normal.
+- [ ] Reconexión → el jugador recupera su coche (claimSpawns) sin duplicar, con llaves.
+- [ ] Desconexión a mitad de takeOut → coche recuperable al reconectar.
+- [ ] Jugador que entra antes de que el framework esté listo → espera a player loaded.
+
+## F1-E. Props, llaves, fuel y salud
+- [ ] Props guardadas = props aplicadas (mods, colores, neones, extras, livery, ruedas, tinte, matrícula y su estilo).
+- [ ] Props aplicadas también para otros clientes (statebag o sync servidor), no solo para quien saca.
+- [ ] Fuel restaurado con cada adaptador (ox_fuel statebag, LegacyFuel, cdn-fuel, nativo); valor fijado a 0–100.
+- [ ] Salud de motor, carrocería y depósito restaurada; puertas, ventanas y ruedas si están en el alcance.
+- [ ] Llaves dadas al sacar con qbx_vehiclekeys, qb-vehiclekeys y el adaptador común; revocadas al guardar o cambiar de dueño.
+- [ ] Llaves compartidas persisten tras reinicio y se borran al restaurar (R5-4).
+
+## F1-F. Props corruptas o maliciosas
+- [ ] Props `NULL`, JSON vacío, JSON truncado o inválido en BD → el coche sale con props por defecto y se avisa en el log, sin error de Lua.
+- [ ] Tipos incorrectos (string en vez de número, NaN, inf, negativos, índices de mod fuera de rango) → se ignoran o se fijan a valores válidos.
+- [ ] Props enormes (>64 KB) o con claves extra → rechazadas o recortadas; tamaño máximo definido.
+- [ ] Modelo de props distinto del modelo del vehículo → no se aplican.
+- [ ] El cliente nunca puede escribir props de un coche que no es suyo ni fuera del flujo store; validación en servidor (propiedad, distancia, rate limit).
+- [ ] Formato de props de ESX, QB y Qbox (ox_lib) importado correctamente, incluidas diferencias de nombres de campo.
+
+## F1-G. Trigger de guardado en el cliente
+- [ ] Solo se activa dentro de la zona de guardado, como conductor y solo.
+- [ ] Debounce/cooldown: mantener o spamear la tecla no envía más de un `storeVehicle`.
+- [ ] Respuesta de error (`occupied`, `not_owner`, `too_far`...) se muestra traducida.
+- [ ] Sin bucle activo fuera de las zonas (ox_lib points/zones).
+
+## F1-H. Matriz de frameworks
+Cada caso de F1-B a F1-G se ejecuta en las tres variantes:
+| Caso | qbx (Qbox + ox_lib) | qb (QBCore) | esx (ESX Legacy) |
+|---|---|---|---|
+| Tabla | `player_vehicles` (citizenid/state) | `player_vehicles` (citizenid/state) | `owned_vehicles` (owner/stored) |
+| Props | `mods` JSON ox_lib | `mods` JSON QB | `vehicle` JSON ESX |
+| Llaves | qbx_vehiclekeys (entidad) | qb-vehiclekeys (matrícula) | adaptador común |
+| Fuel | ox_fuel | LegacyFuel / cdn-fuel | ox_fuel / LegacyFuel |
+- [ ] Arranque limpio sin errores en consola en cada uno.
+- [ ] Coche comprado en el concesionario del framework → aparece, sale, se guarda y se sincroniza.
+- [ ] Venta o transferencia en el framework → cambia de dueño o pasa a REMOVED sin perder multas.
+
+## F1-I. Backlog de fase 0 a verificar
+- [ ] R6-1, R6-2, NUI-R4-1 a R4-4 y NUI-R5-1/R5-2 de `docs/backlog-phase1.md` cerrados o reclasificados.
+- [ ] N11: transparencia de la NUI comprobada en el cliente FiveM real.

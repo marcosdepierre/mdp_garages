@@ -166,3 +166,6 @@ regenerate the patch: diff a fresh CLI copy against `src/components/<file>` (`di
  
  export interface IllustrationProps extends HTMLAttributes<HTMLDivElement> {
 ```
+
+## Excepción aprobada: `sonner` (P1F-M4)
+Aprobada por Senior Developer el 2026-10-16. `sonner` se acepta como motor de toasts porque el propio Untitled UI lo declara como dependencia. El contenido de cada toast tiene que construirse con componentes de Untitled UI (FeaturedIcon, Button). Un toast con markup propio, o cualquier otra librería de toasts, sigue contando como fallo.

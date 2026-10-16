@@ -48,3 +48,39 @@ R6-2: cerrado (pcall en AddVehicle). R6-1: cerrado en persistence.lua, parcial e
 | P1R2-L2 | Baja | server/vehicles.lua:256-264 (AddVehicle) | `json.encode(props)` y `SanitizeProps` sin pcall: NaN/inf → el export lanza un error en vez de devolver `invalid_props`. | pcall en los dos. |
 | P1R2-L3 | Baja | server/streamer.lua `despawnParked` | No recalcula `nearest > despawnR` dentro del lock: parpadeo si un jugador vuelve durante el snapshot de 2 s. | Recalcular la distancia antes de borrar. |
 | P1R2-L4 | Baja | server/streamer.lua `mergeSnapshot` | Con `props` NULL en la BD, la base `{}` no tiene `model` → `SanitizeProps` lo rechaza y se pierde el desgaste. | Base `{ model = row.model }`. |
+
+## QA fase 1 — Integraciones (16/10/2026, commits 4bf7b64 + ac77923)
+| # | Severidad | Archivo:línea | Descripción | Arreglo |
+|---|---|---|---|---|
+| P1I-M1 | Media | bridge/vehicle/props.lua:136-149 | El NACK determinista se acepta sin repetir las comprobaciones en el servidor (lo contrario de lo que dice integrations.md); un dueño de red ajeno puede anular la aplicación de props. | Validar en el servidor el modelo y que el payload se decodifica antes de aceptar el NACK. |
+| P1I-M2 | Media | bridge/vehicle/framework_sync.lua:98-101 | `OnRelease` sin llamadores: `pound` de ESX no se limpia al liberar. | Hook en la liberación del incautado. |
+| P1I-M3 | Media | server/vehicles.lua:82-85 | Al cambiar de dueño no se revocan las llaves del recurso externo. | `Bridge.Keys.RemoveKeys` al antiguo dueño si está online. |
+| P1I-M4 | Media | server/streamer.lua | P1-M4 sigue abierto: Integraciones no da llaves en el spawn del streamer. | Ver P1-M4. |
+| P1I-L1 | Baja | server/garages.lua:259-261 | `OnStore` tras `DeleteEntity`: con qbx `RemoveKeys` devuelve false (inocuo). | Llamarlo antes de borrar la entidad. |
+| P1I-L2 | Baja | bridge/vehicle/props.lua (cliente) | Fallo transitorio: `propsApplied(false)` llega solo tras ~10 s. | Documentar o emitir un aviso antes. |
+
+## Desde QA fase 1 R3 (16/10/2026, HEAD fecc05a)
+- **Cerrado:** P1R2-L4 (N2b, `model` en `mergeSnapshot`).
+- **Siguen abiertos:** P1-M3, P1-M4/P1I-M4, P1I-M1..M3.
+- **Bloqueante, no backlog:** P1R3-H1 (Alta), en docs/qa-review-phase1-backend.md §R3.
+
+| # | Severidad | Archivo:línea | Descripción | Arreglo |
+|---|---|---|---|---|
+| P1R3-L1 | Baja | server/persistence.lua (adopción al arrancar, rama rechazado y vacío) | Un coche en OUT sin marca y vacío se borra y pasa a GARAGED con las props de la BD: se pierde el tuning no guardado (coches de concesionario). | Snapshot antes de borrar, o pasarlo a PARKED_WORLD en el sitio. |
+| P1R3-L2 | Baja | server/security.lua `MarkServerEntity`/`IsServerEntity` | Sin `sv_stateBagStrictMode`, el dueño de red puede sobrescribir `mdp_srv` y romper la adopción de su propio coche (DoS sobre sí mismo). | Confiar primero en `serverEnts`; documentar el modo estricto como requisito. |
+| P1F-M1 | Media | web/src/types/index.ts (`NUI_ERROR_CODES`) | Falta `invalid_props` (sí está en `Constants.ErrorCodes`, architecture.md, i18n y locales). `normalizeError` lo convierte en `rejected` → un store con props inválidas muestra "Solicitud rechazada" en lugar de `err_invalid_props` (verificado con un toast real). | Añadir `'invalid_props'` a `NUI_ERROR_CODES` y un test que compare las 5 listas. |
+| P1F-M2 | Media | client/zones.lua `guarded` (fecc05a) | El safety timeout de 15 s libera `busy` aunque la petición siga en curso (el `lib.callback.await` de ox_lib espera hasta `ox:callbackTimeout` = 300 s). `/mdp_park` (hilo de comando) puede mandar un segundo `parkWorld`/`storeVehicle` mientras el primero está pendiente; el resultado tardío se descarta sin toast, así que el jugador ve "timeout" aunque la operación haya salido bien. El servidor lo protege (WithLock + estado + RATE). | Pasar timeout a la llamada (`lib.callback.await` con `ox:callbackTimeout` bajo o un promise propio con `SetTimeout` que resuelva `timeout`) y no liberar `busy` hasta que la promesa se resuelva; o al llegar tarde, mostrar el resultado real con el mismo id. |
+| P1F-M3 | Media | client/zones.lua `point:nearby` → `storeCurrent`/`openGarage` | `storeCurrent` hace `lib.callback.await` dentro de `nearby`, que ox_lib llama desde el hilo único de points: mientras espera (normalmente ~100 ms, hasta 300 s en el peor caso) se congelan todos los points (onExit/textUI, abrir garaje). | Envolver la acción en `CreateThread(function() storeCurrent(id) end)` (guarded ya serializa). |
+| P1F-M4 | Media (decisión del lead) | web/package.json `sonner` 2.0.8, web/src/toasts.tsx | Librería fuera de UUI para los toasts (Notifications es PRO). La pide el Designer (§7/§9.3) y es dependencia del propio repo untitleduico/react (package.json upstream: `sonner ^2.0.8`), pero la regla dura del lead no la recoge como excepción. El contenido del toast es un div maquetado con FeaturedIcon + Button UUI. | El lead lo aprueba por escrito (como los mdp patches) y se anota en UNTITLEDUI_PATCHES.md. |
+| P1F-L1 | Baja | client/zones.lua `storeCurrent` | El cliente solo comprueba que eres el conductor, no que vas solo; con pasajeros se manda la petición y el servidor responde `occupied` (toast traducido). F1-G pide "conductor y solo". | Comprobar los asientos (`IsVehicleSeatFree` / `GetVehicleNumberOfPassengers`) antes de enviar y avisar con `err_occupied` sin hacer la llamada. |
+| P1F-L2 | Baja | client/props.lua (odómetro) | Bucle permanente fuera de las zonas (Wait 1000/1500). No es Wait(0), pero va contra "sin bucle activo fuera de zonas". | `lib.onCache('vehicle')`/`cache.seat` para arrancar el hilo solo al conducir. Medir resmon en el cliente (no se ha podido medir). |
+| P1F-L3 | Baja | web/src/toasts.tsx, DetailView | §9.2/9.4: falta "Reintentar" dentro del toast de error y el retardo de 1 s para `rate_limited`. | Añadir action al toast para los códigos de RETRYABLE; deshabilitar Retry 1 s si `rate_limited`. |
+| P1F-L4 | Baja | web/src/format.ts `fmtMoney` | En inglés sale `2,500 $` (sufijo fijo). | `Intl.NumberFormat(lang, {style:'currency', currency:'USD', maximumFractionDigits:0})`. |
+| P1F-L5 | Baja | web/src/views/VehicleTable.tsx:44-45 | Las barras de la lista usan `clampPct(v.engine,10)` y el detalle `healthPct` (mismo resultado hoy, pero son dos caminos). | Usar `healthPct` en los dos sitios. |
+
+## Desde QA fase 1 R4 (16/10/2026, HEAD 29d09a5)
+- **Cerrado:** P1R3-H1 (Alta).
+
+| # | Severidad | Archivo:línea | Descripción | Arreglo |
+|---|---|---|---|---|
+| P1R4-L1 | Baja | shared/utils.lua:174-178 `Utils.SameModel` | Los floats no enteros se convierten en 0 en los dos lados → `SameModel(1.5, 2.5) == true`. Un nombre de modelo como string devuelve false (se espera un hash). | Si `math.tointeger` da nil → return false; documentar que se esperan hashes o aplicar `Utils.ModelHash` dentro. |
