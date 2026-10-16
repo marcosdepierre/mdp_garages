@@ -291,3 +291,49 @@ Código: `server/persistence.lua:121-127` (`ec0c3b7`). Cada condición, comproba
 - **R3-2 (Info) — Entidades sin marca de versiones anteriores.** En el primer reinicio tras desplegar `a8fda43`, las entidades vivas creadas antes no tienen `mdp_srv`. Si están vacías se borran y la fila sigue el flujo normal (OUT → GARAGED, PARKED_WORLD → respawn por el streamer). Si están ocupadas se ignoran. No hay pérdida ni duplicado. Avisarlo en las notas de la versión.
 - **R3-3 (Info) — El streamer borra una entidad propia «movida».** Si una entidad del servidor sin trackear se movió más de `ParkedMoveTolerance` (por ejemplo, empujada), el streamer la borra y la vuelve a spawnear en las coords de BD. No hay duplicado; se pierde el desplazamiento. Es aceptable.
 - **R3-4 (Info) — Secreto sin convar.** Sin `mdp_garages_entity_secret`, el secreto queda en el KVP del recurso. Cualquiera con acceso a los archivos del servidor puede leerlo (el mismo nivel de confianza que la base de datos). La convar sigue siendo lo recomendado.
+
+---
+
+# Re-revisión 4 — Solo vehículos propios (16/10/2026, 23:10 UTC+1)
+
+Commits revisados: `b17d813`, `f01f58d` (backend), sobre HEAD `169cb30`. La regla y los vectores están en `docs/security.md` §12.
+
+## Contrato del helper (adaptado a la llamada del backend)
+`Security.CanStoreOwnVehicle(src, ent, opts) -> ok, plate | false, err[, row]`, con `opts = { plate, row, maxDistance, allowDriver, allowKeys }` (los mismos que pasa `server/garages.lua:251-252`) y, de forma opcional, `states`, `requireDriver` y `requireEmpty`. Errores: `invalid_source`, `invalid_entity`, `not_server_entity`, `plate_mismatch`, `not_tracked`, `not_owner`, `wrong_state`, `model_mismatch`, `too_far`, `not_driver`, `occupied`. El backend mapea los que no conoce a `vehicle_mismatch` (`STORE_ERR`), lo cual es correcto. Nuevo: `Security.RegisterExternalVehicle(netId, plate, ownerSrc?)` para los concesionarios.
+
+## Verificación
+
+| Punto | Veredicto |
+|---|---|
+| Fallback local equivalente | **Sí** (`garages.lua:211-226`): mismo orden y mismos códigos. Diferencias menores: no revisa `invalid_entity` (ya lo hace `storeTarget`, l.233-244) y mira la propiedad con `IsOwner` en BD en vez de `row.owner` (equivalente). Si `CanStoreOwnVehicle` lanza un error, `pcall` falla cerrado con `not_server_entity`. |
+| storeVehicle: comprobaciones antes de efectos | **Sí** (`garages.lua:273-301`): `storeTarget` → en el vehículo → solo el conductor → lock → `lockedOwnVehicle` → y solo entonces el saneado, el UPDATE condicional `state = OUT` y `DeleteEntity`. |
+| parkWorld: comprobaciones antes de efectos | **No del todo** → OV-1. |
+| Qué se quitó de `f7e1789` | `b17d813` elimina `lockedVehicleChecks` (que **borraba** el clon con el jugador dentro), la aceptación de entidades **no trackeadas** en OUT (R3-1, la vía de los concesionarios) y el guardado desde PARKED_WORLD. La parte de `f7e1789` en `persistence.lua` (P1R3-H1 `keepOut`, `SameModel` en `UniqueWorldVehicle` y en la excepción OUT) **sigue intacta** (`b17d813` no toca persistence ni utils). Sin regresión de P1R3-H1 ni del anti-duplicado del arranque. |
+| Quitar el guardado desde el estado 2 | No rompe flujos legítimos. El dueño que se sube a su coche aparcado lo pasa a OUT vía `becameDriven` en ≤ `StreamerTickMs` (1,5 s) y entonces puede guardarlo. Solo falla (`invalid_state`) si intenta guardar antes de ese tick → OV-4 (Bajo, de UX). |
+| `/mdp_regularize` | ACE aplicado por FiveM en el servidor (`RegisterCommand(..., true)`); la consola (src 0) siempre puede. Matrícula validada, sin reasignar dueño, sin marcar entidades, con registro. **Pero:** OV-2 y OV-3. |
+
+## Hallazgos
+
+**OV-1 (Medio) — parkWorld ejecuta el auto-impound antes de la comprobación completa**
+`server/garages.lua:345-362`. Antes del lock solo se comprueba la marca, que esté vacío, las coords y `IsOwner`. **No** se comprueba el tracking, el estado OUT, el modelo ni la **distancia**. Con el servidor en `MaxWorldParkedServer` y `AutoImpoundOldest` activo, un jugador con un coche marcado propio (aunque esté lejos) puede llamar a `parkWorld` una vez por segundo: cada llamada **incauta el coche aparcado más antiguo de otro jugador** (`freeWorldSlot`) y luego falla con `too_far` dentro del lock. Es griefing masivo.
+*Arreglo:* ejecutar `Security.CanStoreOwnVehicle(src, veh, { plate = plate, requireEmpty = true, maxDistance = Config.MaxVehicleDistance })` (solo lectura) **antes** de los límites y de `freeWorldSlot`, y repetirla dentro del lock (ya se hace).
+
+**OV-2 (Medio) — `/mdp_regularize` puede crear un duplicado**
+`server/garages.lua:400-411`. El bucle solo mira entidades cuya matrícula **visible** coincide y salta las marcadas. Después solo rechaza si hay una entidad **trackeada**. Una entidad marcada pero **no trackeada** (p.ej. ocupada y rechazada en el arranque → P1R3-H1, fila OUT) o marcada con la matrícula visible cambiada sigue en el mundo, y la fila pasa a GARAGED → el dueño la saca → duplicado.
+*Arreglo:* antes de cambiar nada, recorrer **todos** los vehículos y rechazar si alguno cumple `Security.IsServerEntity(ent, plate)` o tiene esa matrícula visible y está ocupado. Hacer esa comprobación primero y borrar después (ver OV-3).
+
+**OV-3 (Bajo) — `/mdp_regularize` borra a medias y acepta cualquier estado**
+`server/garages.lua:400-406, 410`. Si encuentra una entidad ocupada a mitad del bucle, devuelve un error **después** de haber borrado otras. Además, el UPDATE pasa a GARAGED cualquier estado distinto de REMOVED, **incluido IMPOUNDED** (salta la multa o tasa del depósito, y la fila de `mdp_impound` queda huérfana) y RETIRED.
+*Arreglo:* dos pasadas (comprobar y luego borrar), `WHERE plate = ? AND state = ?` con OUT (o PARKED_WORLD), rechazar IMPOUNDED/RETIRED, y registrar el identificador del admin (no solo el src).
+
+**OV-4 (Bajo, UX) — Guardar justo al subirse a un coche aparcado**
+Entre subirse y el siguiente tick del streamer, la fila sigue en PARKED_WORLD → `invalid_state`. *Arreglo opcional:* que la NUI muestre «inténtalo de nuevo en un momento», o que `storeVehicle` llame a `becameDriven` (con las mismas comprobaciones de dueño y lock) antes de validar.
+
+**OV-5 (Medio, funcional) — Los concesionarios ya no pueden guardar sus coches**
+Al quitar la aceptación de entidades no trackeadas en OUT, los vehículos entregados por un concesionario con `AddVehicle(..., 'out')` no se pueden guardar ni aparcar. *Arreglo:* `exports('RegisterExternalVehicle', function(netId, plate) return Security.RegisterExternalVehicle(netId, plate) end)` en el servidor y documentarlo en `docs/integrations.md`. La heurística (`AllowFirstStoreAdoption`) queda desactivada por defecto (§12 de security.md).
+
+**OV-6 (Info) — `Config.AllowSharedKeyStore`**
+Reservado y false por defecto. Si se activa, contradice el requisito de Marcos (solo dueño); tendría que decidirse explícitamente en la fase 3.
+
+## Veredicto
+El requisito «solo vehículos propios» queda **cumplido en storeVehicle**. En **parkWorld** queda cumplido para guardar/aparcar, pero tiene el efecto secundario previo OV-1, que hay que arreglar antes de cerrar. `/mdp_regularize` necesita OV-2 antes de usarse en producción.

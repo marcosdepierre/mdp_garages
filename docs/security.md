@@ -125,10 +125,53 @@ Siempre en servidor vía `Bridge.GetJob(src)` → `{ name, grade, onDuty }`. Usa
 
 Revisión de fase 1 con hallazgos para backend: `docs/security-review-phase1.md`.
 
+## 12. Guardar / aparcar solo vehículos propios
+
+**Regla (servidor, dentro del lock de la matrícula, antes de cualquier efecto):** `Security.CanStoreOwnVehicle(src, ent, opts)` debe devolver `true`. Esto exige todo lo siguiente:
+1. `Security.IsServerEntity(ent, plate)`: la entidad la creamos nosotros para **esa** matrícula. La marca secreta liga la matrícula; un cambio de matrícula o un clon no la tienen.
+2. La matrícula visible (`GetVehicleNumberPlateText`) es igual a la de la marca. Si no → `plate_mismatch`.
+3. `Security.GetSpawnedEntity(plate) == ent`: es la entidad trackeada. Si no → `not_tracked`.
+4. La fila, releída dentro del lock, tiene `owner == Bridge.GetIdentifier(src)`. Las **llaves no cuentan** (`allowKeys` solo con `Config.AllowSharedKeyStore`, false por defecto). Si no → `not_owner`.
+5. Estado de la fila = OUT. Si no → `wrong_state`.
+6. Mismo modelo (hash sin signo). Si no → `model_mismatch`.
+7. Al guardar, el jugador es el conductor (`allowDriver`). Al aparcar, el vehículo está vacío y el jugador a ≤ `MaxVehicleDistance`. Si no → `too_far` / `not_driver` / `occupied`.
+
+La matrícula sale de la marca o del tracking (`opts.plate` como candidata, que la marca **demuestra**), **nunca** del texto de matrícula que manda el cliente.
+
+**Vectores cubiertos:**
+
+| Vector | Cómo se para |
+|---|---|
+| Cambio de matrícula en el cliente o con un plate-changer | `plate_mismatch` (la marca liga la matrícula original) |
+| Mi matrícula clonada en un coche robado o de NPC (mismo modelo o no) | `not_server_entity` |
+| NPC o coche ambiental con la matrícula de una fila de BD | `not_server_entity` |
+| `mdp_plate` / `mdp_srv` forjados desde el cliente | `not_server_entity` (el secreto no sale del servidor) |
+| netId falso o de otro jugador | `invalid_entity` / `not_owner` |
+| Snapshot repetido | Token de un solo uso y comprobación de dueño de red (sección 10) |
+| Coche OUT del dueño mientras existe un clon | Solo la entidad trackeada pasa (`not_tracked` para el clon) |
+| Guardar mientras otro conduce | `not_driver` / `occupied` |
+
+**Vehículos anteriores a `a8fda43` (sin marca):** se rechazan con un mensaje claro (`vehicle_mismatch` → «Este vehículo no está registrado en el garaje; pide a un admin que lo regularice»). Vía de admin: `/mdp_regularize <plate>` (ACE `command.mdp_regularize`). Solo debe actuar si **no** hay en el mundo ninguna entidad marcada para esa matrícula y la fila está en OUT. Borra únicamente entidades vacías sin marca, nunca cambia el dueño, nunca marca entidades y siempre deja registro.
+
+### Adopción en el primer guardado (concesionarios de terceros)
+- **Vía preferida:** el export de servidor `RegisterExternalVehicle(netId, plate)` → `Security.RegisterExternalVehicle(netId, plate, ownerSrc?)`. Hace `MarkServerEntity` + `TrackSpawn` si la entidad existe, la matrícula visible es `plate`, no tiene ninguna marca mdp, no está trackeada para otra matrícula, no hay otra entidad trackeada para `plate`, y la fila existe con el mismo modelo y en estado OUT. No cambia el dueño ni el estado. Solo se puede llamar desde el servidor (los exports no son accesibles desde el cliente) y deja registro con `GetInvokingResource()`.
+- **Heurística de respaldo:** detrás de `Config.AllowFirstStoreAdoption = false` (por defecto). Si se activa, todo esto es obligatorio:
+  - Rechazar la entidad si tiene **cualquier** marca mdp (`mdp_srv`/`mdp_plate`) o está trackeada para otra matrícula.
+  - `GetEntityPopulationType(ent) == 7` (misión/script, no ambiental).
+  - La fila se creó hace ≤ 30 min (`created_at`) y **nunca** ha estado gestionada (columna `managed = 0`; se pone a 1 en la primera adopción o el primer spawn: un solo uso).
+  - En BD, `owner == identificador del jugador`; la matrícula visible y el modelo coinciden; no hay ninguna otra entidad viva con esa matrícula; el jugador es el conductor.
+  - Al adoptar se conservan las props de BD/stock y del cliente solo se aceptan `Security.PropSnapshotFields`.
+  - Rate limit por jugador (p.ej. 1 cada 60 s) y registro de auditoría (`LogReject`/`OnSuspicious` en los rechazos y un print con el identificador en las aceptaciones).
+  - Si cualquiera falla, rechazar: es la superficie de un clon.
+
 ## 11. Checklist de revisión (PR)
 
 - [ ] Todo evento de red usa `RegisterSecureEvent`/`RegisterSecureCallback` con `schema` estricto.
 - [ ] `rateLimit` adecuado definido.
+- [ ] Guardar/aparcar: `Security.CanStoreOwnVehicle` dentro del lock y antes de cualquier efecto (incluido auto-impound o liberar huecos); la matrícula sale de la marca, nunca del texto del cliente.
+- [ ] Ninguna ruta que guarde o aparque acepta llaves salvo `Config.AllowSharedKeyStore`.
+- [ ] Vehículos de terceros: solo vía `RegisterExternalVehicle` (servidor) o la heurística con `AllowFirstStoreAdoption` y todas sus condiciones.
+- [ ] Comandos de admin: `restricted = true` (ACE), validación de matrícula, registro, sin reasignar dueño ni marcar entidades arbitrarias.
 - [ ] Props del cliente pasadas por `Security.SanitizeProps(props, row, veh)` y guardado el JSON saneado.
 - [ ] Salud escrita en BD con `Security.ClampHealth`.
 - [ ] Spawn en `pcall` con rollback al estado previo exacto.

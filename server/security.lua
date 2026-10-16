@@ -40,7 +40,7 @@ Security.Config = {
 -- Whitelist de tablas/columnas permitidas para identificadores dinámicos en SQL.
 local SQL_IDENT_WHITELIST = {
     mdp_vehicles = true, mdp_vehicle_keys = true, holder = true,
-    plate = true, owner = true, state = true, garage_id = true,
+    plate = true, owner = true, state = true, garage_id = true, model = true,
 }
 
 ---------------------------------------------------------------------------
@@ -593,6 +593,123 @@ CreateThread(function()
         for ent in pairs(serverEnts) do if not DoesEntityExist(ent) then serverEnts[ent] = nil end end
     end
 end)
+
+---------------------------------------------------------------------------
+-- Guardar / aparcar SOLO vehículos propios (requisito de Marcos)
+---------------------------------------------------------------------------
+--- Matrícula según el SERVIDOR (marca o tracking), nunca según GetVehicleNumberPlateText del cliente.
+---@param ent integer
+---@return string|nil plate
+function Security.PlateOfEntity(ent)
+    if not ent or ent == 0 or not DoesEntityExist(ent) then return nil end
+    local p = serverEnts[ent]
+    if p then return p end
+    local netId = NetworkGetNetworkIdFromEntity(ent)
+    for plate, sp in pairs(spawned) do
+        if sp.netId == netId and Security.IsServerEntity(ent, plate) then return plate end
+    end
+    return nil
+end
+
+--- Regla única para storeVehicle / parkWorld (contrato usado por server/garages.lua lockedOwnVehicle).
+--- Llamar DENTRO de Security.WithLock(plate). Solo el dueño (las llaves no cuentan salvo opts.allowKeys,
+--- reservado a Config.AllowSharedKeyStore, false por defecto).
+---@param src integer
+---@param ent integer  entidad resuelta en servidor desde el netId
+---@param opts table|nil {
+---   plate = string|nil,       -- matrícula candidata (p.ej. de mdp_plate); se DEMUESTRA con IsServerEntity.
+---                               Si falta se usa Security.PlateOfEntity(ent). Nunca GetVehicleNumberPlateText.
+---   row = table|nil,          -- fila releída dentro del lock {owner, model, state}; si falta se consulta.
+---   maxDistance = number,     -- por defecto Config.MaxVehicleDistance o 5.0
+---   allowDriver = boolean,    -- si el jugador es el conductor, no se aplica la distancia (store)
+---   allowKeys = boolean,      -- false por defecto: solo dueño
+---   states = table|nil,       -- estados permitidos, por defecto { [0] = true } (solo OUT)
+---   requireDriver = boolean,  -- opcional: exigir conductor y solo él dentro
+---   requireEmpty = boolean }  -- opcional: exigir vehículo vacío (park)
+---@return boolean ok, string plateOrErr, table|nil row
+--- Errores: invalid_source, invalid_entity, not_server_entity, plate_mismatch, not_tracked, not_owner,
+---          wrong_state, model_mismatch, too_far, not_driver, occupied
+function Security.CanStoreOwnVehicle(src, ent, opts)
+    opts = opts or {}
+    if not src or GetPlayerName(src) == nil then return false, 'invalid_source' end
+    if not ent or ent == 0 or not DoesEntityExist(ent) or GetEntityType(ent) ~= 2 then return false, 'invalid_entity' end
+    -- 1) origen: creada por nosotros para ESA matrícula (la marca liga la matrícula; un cambio la rompe)
+    local plate = opts.plate and V.normalizePlate(opts.plate) or Security.PlateOfEntity(ent)
+    if not plate or not Security.IsServerEntity(ent, plate) then return false, 'not_server_entity' end
+    -- 2) la matrícula visible sigue siendo la nuestra (SetVehicleNumberPlateText / plate-changer)
+    if V.normalizePlate(GetVehicleNumberPlateText(ent) or '') ~= plate then return false, 'plate_mismatch' end
+    -- 3) LA entidad trackeada de esa matrícula (clones fuera)
+    if Security.GetSpawnedEntity(plate) ~= ent then return false, 'not_tracked' end
+    -- 4) BD: dueño, estado, modelo
+    local row = opts.row
+    if not row then
+        local c = Security.Config
+        local q = ('SELECT %s AS owner, `model`, `state` FROM %s WHERE %s = ? LIMIT 1'):format(
+            Security.SqlIdent(c.ownerColumn), Security.SqlIdent(c.ownedTable), Security.SqlIdent(c.plateColumn))
+        row = MySQL.single.await(q, { plate })
+    end
+    if not row then return false, 'not_owner' end
+    local ident = Bridge and Bridge.GetIdentifier and Bridge.GetIdentifier(src)
+    if type(ident) ~= 'string' or ident == '' then return false, 'not_owner' end
+    local owns = (row.owner ~= nil and row.owner == ident)
+    if not owns and row.owner == nil then owns = Security.IsOwner(src, plate, false) end
+    if not owns and opts.allowKeys == true then owns = Security.IsKeyHolder(src, plate, ident) end
+    if not owns then return false, 'not_owner' end
+    local states = opts.states or { [0] = true }
+    if not states[tonumber(row.state)] then return false, 'wrong_state', row end
+    local dbHash = Utils.ModelHash(row.model)
+    if math.type(dbHash) ~= 'integer' or (GetEntityModel(ent) & 0xFFFFFFFF) ~= (dbHash & 0xFFFFFFFF) then
+        return false, 'model_mismatch', row
+    end
+    -- 5) conductor / distancia / ocupación
+    local ped = GetPlayerPed(src)
+    local isDriver = GetPedInVehicleSeat(ent, -1) == ped
+    if opts.requireDriver then
+        if not isDriver then return false, 'not_driver' end
+        if not Utils.IsVehicleEmpty(ent, ped) then return false, 'occupied' end
+    elseif opts.requireEmpty and not Utils.IsVehicleEmpty(ent) then
+        return false, 'occupied'
+    end
+    if not (opts.allowDriver and isDriver) then
+        local maxD = opts.maxDistance or (type(Config) == 'table' and Config.MaxVehicleDistance) or 5.0
+        if not Security.IsNear(src, GetEntityCoords(ent), maxD) then return false, 'too_far' end
+    end
+    return true, plate, row
+end
+
+--- Registro de vehículos creados por OTRO recurso del servidor (concesionario). Exportarlo SOLO server-side.
+--- Marca + trackea si: entidad vehículo existente, matrícula visible = plate, sin marca mdp previa,
+--- no trackeada para otra matrícula, ninguna otra entidad trackeada para plate, fila en BD con mismo modelo
+--- y estado OUT. No cambia dueño ni estado.
+---@param netId integer
+---@param plate string
+---@param ownerSrc integer|nil
+---@return boolean ok, string|nil err
+function Security.RegisterExternalVehicle(netId, plate, ownerSrc)
+    netId = math.tointeger(netId)
+    plate = V.normalizePlate(plate)
+    if not netId or not plate or not V.isPlate(plate) then return false, 'invalid_request' end
+    local ent = NetworkGetEntityFromNetworkId(netId)
+    if not ent or ent == 0 or not DoesEntityExist(ent) or GetEntityType(ent) ~= 2 then return false, 'invalid_entity' end
+    if V.normalizePlate(GetVehicleNumberPlateText(ent) or '') ~= plate then return false, 'plate_mismatch' end
+    if serverEnts[ent] ~= nil or Entity(ent).state[SRV_KEY] ~= nil then return false, 'already_marked' end
+    for p, sp in pairs(spawned) do
+        if sp.netId == netId and p ~= plate then return false, 'tracked_other_plate' end
+    end
+    if Security.GetSpawnedEntity(plate) then return false, 'already_tracked' end
+    local c = Security.Config
+    local q = ('SELECT `model`, `state` FROM %s WHERE %s = ? LIMIT 1'):format(Security.SqlIdent(c.ownedTable), Security.SqlIdent(c.plateColumn))
+    local row = MySQL.single.await(q, { plate })
+    if not row then return false, 'not_found' end
+    if tonumber(row.state) ~= 0 then return false, 'wrong_state' end
+    local dbHash = Utils.ModelHash(row.model)
+    if math.type(dbHash) ~= 'integer' or (GetEntityModel(ent) & 0xFFFFFFFF) ~= (dbHash & 0xFFFFFFFF) then return false, 'model_mismatch' end
+    Security.MarkServerEntity(ent, plate)
+    Security.TrackSpawn(plate, netId, ownerSrc)
+    Entity(ent).state:set('mdp_plate', plate, true)
+    print(('[%s][SECURITY] RegisterExternalVehicle %s netId=%d (%s)'):format(c.resourceName, plate, netId, GetInvokingResource and tostring(GetInvokingResource()) or '?'))
+    return true
+end
 
 ---------------------------------------------------------------------------
 -- SQL seguro
