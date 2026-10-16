@@ -383,3 +383,7 @@ R2-M2 (comprador offline / política de desconexión) y TR-3..TR-5 → backlog d
 
 ## Veredicto R5 (HEAD `e10f763`)
 **Backend de propiedad: 0 Crítica/Alta → R3-H1 cerrado; se puede cerrar por parte de Backend.** Queda **P1-OWN-R5-M1 (Frontend: `duplicate_plate` falta en la NUI; el e2e de códigos de error está en rojo)** y la deuda Media/Baja del backlog (R4-M1, M1, M3, M4, R5-L1, …).
+
+## Propiedad R6 (d26a0eb, Frontend)
+- P1-OWN-R5-M1: **cerrado**. `duplicate_plate` está en `web/src/types/index.ts`, en `web/src/i18n.tsx` y en `docs/architecture.md`. El `web/dist` recompilado coincide byte a byte con el commiteado y `error-codes.e2e.mjs` pasa en verde (las 4 comprobaciones).
+- Estado: la propiedad (F1-J) queda sin Critical, High ni Medium abiertos por regresión. Quedan los Medium y Low del backlog, y sigue pendiente la prueba en ESX, QB y Qbox reales.
