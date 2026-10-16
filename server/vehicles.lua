@@ -79,11 +79,40 @@ end
 
 --- Batched INSERT IGNORE. Returns inserted count.
 --- Owner-change handling: revoke all keys of the plate and log (QA N3).
+--- P1-OWN-H1: revoke every key (mdp table + keys resource for the online seller); a live tracked entity stays
+--- tracked and is claimed by the buyer if online.
 local function onOwnerChanged(plate, oldOwner, newOwner)
-    MySQL.update.await('DELETE FROM mdp_vehicle_keys WHERE plate = ?', { plate })
-    print(('^3[mdp_garages] owner of %s changed %s -> %s (framework sync); keys revoked^0'):format(plate, tostring(oldOwner), tostring(newOwner)))
+    pcall(MySQL.update.await, 'DELETE FROM mdp_vehicle_keys WHERE plate = ?', { plate })
+    local ent = Security.GetSpawnedEntity(plate)
+    local sellerSrc = oldOwner and Bridge.GetSourceByIdentifier and Bridge.GetSourceByIdentifier(oldOwner)
+    if sellerSrc and Bridge.Keys and type(Bridge.Keys.RemoveKeys) == 'function' then
+        pcall(Bridge.Keys.RemoveKeys, sellerSrc, ent or plate)
+    end
+    local buyerSrc = newOwner and Bridge.GetSourceByIdentifier and Bridge.GetSourceByIdentifier(newOwner)
+    if ent and buyerSrc then pcall(Security.ClaimSpawn, plate, buyerSrc) end
+    print(('^3[mdp_garages] owner of %s changed %s -> %s; keys revoked%s^0'):format(plate, tostring(oldOwner), tostring(newOwner),
+        ent and ' (entity stays tracked under the buyer)' or ''))
 end
 Vehicles.OnOwnerChanged = onOwnerChanged
+
+--- P1-OWN-H1: transfers apply immediately in every live state (not only garaged/parked). Returns true if applied.
+function Vehicles.ApplyTransfer(plate, oldOwner, newOwner)
+    local ok, n = pcall(MySQL.update.await, 'UPDATE mdp_vehicles SET owner = ? WHERE plate = ? AND owner = ? AND state <> ?',
+        { newOwner, plate, oldOwner, VS.REMOVED })
+    if ok and n == 1 then onOwnerChanged(plate, oldOwner, newOwner) return true end
+    return false
+end
+
+--- P1-OWN-H1: owner of a plate in the framework table (nil if absent/unsupported). Plates compared trimmed + upper.
+function Vehicles.FrameworkOwner(plate)
+    local fw = Bridge.Framework
+    local q
+    if fw == 'esx' then q = 'SELECT `owner` FROM `owned_vehicles` WHERE UPPER(TRIM(`plate`)) = ? LIMIT 1'
+    elseif fw == 'qb' or fw == 'qbx' then q = 'SELECT `citizenid` FROM `player_vehicles` WHERE UPPER(TRIM(`plate`)) = ? LIMIT 1'
+    else return nil end
+    local ok, v = pcall(MySQL.scalar.await, q, { plate })
+    return ok and v or nil
+end
 
 --- Diff-based apply (QA R3-2/R3-3): only NEW plates are inserted; plates whose owner differs are transferred
 --- only when the mdp row is GARAGED or PARKED_WORLD (1/2). OUT (0) / IMPOUNDED (3) are logged and retried next sync.
@@ -127,8 +156,10 @@ function Vehicles.InsertBatch(rows, opts)
                     inserted = inserted + 1
                 end
             elseif not e then
+                -- M5: if the framework table has a date column, a NULL or future date is never adoptable
+                local age = r.fwHasDate and r.fwCreatedTs and (os.time() - (tonumber(r.fwCreatedTs) or -1)) or nil
                 local adoptable = adoptableImport and r.state == VS.OUT
-                    and (r.fwCreatedTs == nil or (os.time() - (tonumber(r.fwCreatedTs) or 0)) <= 1800)
+                    and (not r.fwHasDate or (age ~= nil and age >= -300 and age <= 1800)) -- AD-2: small clock skew allowed
                 ph[#ph + 1] = adoptable and "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'framework', NULL)"
                     or "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'framework', NOW())"
                 if adoptable then print(('[mdp_garages] %s imported for %s as new detection (adoptable 30 min)'):format(r.plate, tostring(r.owner))) end
@@ -138,15 +169,8 @@ function Vehicles.InsertBatch(rows, opts)
                 local base = #params
                 for n = 1, 10 do params[base + n] = vals[n] end
             elseif e.owner ~= r.owner then
-                local st = tonumber(e.state)
-                if st == VS.GARAGED or st == VS.PARKED_WORLD then
-                    local n = MySQL.update.await('UPDATE mdp_vehicles SET owner = ? WHERE plate = ? AND owner = ? AND state IN (?, ?)',
-                        { r.owner, r.plate, e.owner, VS.GARAGED, VS.PARKED_WORLD })
-                    if n == 1 then transferred = transferred + 1; onOwnerChanged(r.plate, e.owner, r.owner) end
-                else
-                    print(('^3[mdp_garages] owner change for %s (%s -> %s) deferred: vehicle is in state %s; retried next sync^0')
-                        :format(r.plate, tostring(e.owner), tostring(r.owner), tostring(st)))
-                end
+                -- P1-OWN-H1: applied immediately, even when OUT (entity stays tracked under the buyer)
+                if Vehicles.ApplyTransfer(r.plate, e.owner, r.owner) then transferred = transferred + 1 end
             end
         end
         if #ph > 0 then
@@ -165,7 +189,12 @@ local dateColCache = {}
 local function frameworkDateCol(tbl)
     if dateColCache[tbl] == nil then
         dateColCache[tbl] = false
-        for _, c in ipairs(DATE_COLS) do if columnExists(tbl, c) then dateColCache[tbl] = c break end end
+        -- AD-2: only DATETIME / TIMESTAMP columns count
+        for _, c in ipairs(DATE_COLS) do
+            local t = MySQL.scalar.await([[SELECT LOWER(DATA_TYPE) FROM information_schema.columns
+                WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? LIMIT 1]], { tbl, c })
+            if t == 'datetime' or t == 'timestamp' then dateColCache[tbl] = c break end
+        end
     end
     return dateColCache[tbl] or nil
 end
@@ -190,11 +219,22 @@ function Vehicles.ImportFromFramework(framework, owner, opts)
     if not tableExists(tbl) then return 0, 0, {} end
     -- identifiers are fixed literals above, never user input
     local dcol = frameworkDateCol(tbl)
-    local q = ('SELECT `%s`%s FROM `%s`'):format(table.concat(cols, '`, `'),
-        dcol and (', UNIX_TIMESTAMP(`%s`) AS fw_created_ts'):format(dcol) or '', tbl)
-    local params = {}
-    if owner then q = q .. (' WHERE `%s` = ?'):format(ownerCol); params[1] = owner end
-    local okQ, rows = pcall(MySQL.query.await, q, params)
+    local function query(withDate)
+        local q = ('SELECT `%s`%s FROM `%s`'):format(table.concat(cols, '`, `'),
+            withDate and (', UNIX_TIMESTAMP(`%s`) AS fw_created_ts'):format(withDate) or '', tbl)
+        local params = {}
+        if owner then q = q .. (' WHERE `%s` = ?'):format(ownerCol); params[1] = owner end
+        return pcall(MySQL.query.await, q, params)
+    end
+    local okQ, rows = query(dcol)
+    if (not okQ or type(rows) ~= 'table') and dcol then
+        -- AD-5: date column broke the query -> forget it and retry once without it (no adoptable imports then)
+        print(('^3[mdp_garages] framework query with date column %s.%s failed (%s); retrying without it^0'):format(tbl, dcol, tostring(rows)))
+        dateColCache[tbl] = false
+        dcol = nil
+        okQ, rows = query(nil)
+        opts = { adoptable = false }
+    end
     if not okQ or type(rows) ~= 'table' then
         print(('^1[mdp_garages] framework query failed on %s: %s^0'):format(tbl, tostring(rows)))
         return 0, 0, {}, 0, false
@@ -202,7 +242,7 @@ function Vehicles.ImportFromFramework(framework, owner, opts)
     local out, skipped = {}, {}
     for _, r in ipairs(rows) do
         local m, why = Vehicles.MapFrameworkRow(framework, r)
-        if m then m.fwCreatedTs = r.fw_created_ts end
+        if m then m.fwCreatedTs, m.fwHasDate = r.fw_created_ts, dcol ~= nil end
         if m and m.owner then out[#out + 1] = m else skipped[why or 'no_owner'] = (skipped[why or 'no_owner'] or 0) + 1 end
     end
     local inserted, transferred = 0, 0
@@ -315,12 +355,8 @@ function Vehicles.AddVehicle(owner, plate, model, props, garageId)
         if src then CreateThread(function() Vehicles.SyncPlayer(src, true) end) end
         return true, 'restored'
     elseif old ~= owner then
-        -- R3-3: transfer only when garaged / world-parked
-        local okU, n = pcall(MySQL.update.await, 'UPDATE mdp_vehicles SET owner = ? WHERE plate = ? AND owner = ? AND state IN (?, ?)',
-            { owner, plate, old, VS.GARAGED, VS.PARKED_WORLD })
-        if not okU then return false, 'db_error' end
-        if n ~= 1 then return false, 'transfer_deferred' end
-        onOwnerChanged(plate, old, owner)
+        -- P1-OWN-H1: transfer applies in every live state
+        if not Vehicles.ApplyTransfer(plate, old, owner) then return false, 'transfer_failed' end
     end
     -- also sync the owner's other framework vehicles if they are online (QA N7)
     local src = Vehicles.FindSourceByIdentifier and Vehicles.FindSourceByIdentifier(owner)

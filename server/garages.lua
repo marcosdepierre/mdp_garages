@@ -83,6 +83,17 @@ local function vehicleOccupied(veh)
     return false
 end
 
+--- P1-OWN-H2/AD-4: any live entity carrying this plate (pool scan), excluding `except`. Returns 'already_out' for a
+--- server-marked one, 'vehicle_mismatch' for an unmarked one, nil if none.
+local function liveEntityConflict(plate, except)
+    for _, ent in ipairs(GetAllVehicles()) do
+        if ent ~= except and Utils.NormalizePlate(GetVehicleNumberPlateText(ent) or '') == plate then
+            return Security.IsServerEntity(ent, plate) and 'already_out' or 'vehicle_mismatch'
+        end
+    end
+    return nil
+end
+
 MDP.Callback('mdp_garages:takeOut', {
     rateLimit = { max = 1, windowMs = 1000 },
     schema = { plate = 'plate', garage_id = Security.V.isGarageId },
@@ -115,6 +126,9 @@ MDP.Callback('mdp_garages:takeOut', {
                 return { ok = false, error = 'vehicle_moved' }
             end
         end
+        -- P1-OWN-H2: never spawn while another live entity carries the plate (the tracked parked one is handled above)
+        local conflict = liveEntityConflict(plate, tracked)
+        if conflict then return { ok = false, error = conflict } end
         local spawn
         for _, sp in ipairs(garage.spawns or {}) do if isSpawnFree(sp) then spawn = sp break end end
         if not spawn then return { ok = false, error = 'no_spawn' } end
@@ -207,7 +221,8 @@ end
 
 --- Local twin of Security.CanStoreOwnVehicle(src, ent, opts) -> ok, plate | false, err (same error names):
 --- not_server_entity, plate_mismatch, not_tracked, not_owner, wrong_state, model_mismatch, too_far.
---- opts = { plate, row, maxDistance, allowDriver, allowKeys }. Must run INSIDE the plate lock with a fresh row.
+--- opts (same names as Security.CanStoreOwnVehicle): { plate, row, maxDistance, allowDriver, allowKeys, states,
+--- requireDriver, requireEmpty }. Must run INSIDE the plate lock with a fresh row.
 local function localCanStoreOwnVehicle(src, ent, opts)
     local plate = opts.plate
     if not plate or not Security.IsServerEntity(ent, plate) then return false, 'not_server_entity' end
@@ -216,16 +231,26 @@ local function localCanStoreOwnVehicle(src, ent, opts)
     if Security.GetSpawnedEntity(plate) ~= ent then return false, 'not_tracked' end
     local row = opts.row
     if not row or not Security.IsOwner(src, plate, opts.allowKeys == true) then return false, 'not_owner' end
-    if tonumber(row.state) ~= VS.OUT then return false, 'wrong_state' end
+    local states = opts.states or { [VS.OUT] = true }
+    if not states[tonumber(row.state)] then return false, 'wrong_state' end
     if not Utils.SameModel(GetEntityModel(ent), Utils.ModelHash(row.model)) then return false, 'model_mismatch' end
-    local isDriver = opts.allowDriver and GetPedInVehicleSeat(ent, -1) == GetPlayerPed(src)
-    if not isDriver and not Security.IsNear(src, GetEntityCoords(ent), opts.maxDistance or Config.MaxVehicleDistance) then
+    local ped = GetPlayerPed(src)
+    local isDriver = GetPedInVehicleSeat(ent, -1) == ped
+    if opts.requireDriver then
+        if not isDriver then return false, 'not_driver' end
+        if not Utils.IsVehicleEmpty(ent, ped) then return false, 'occupied' end
+    elseif opts.requireEmpty and not Utils.IsVehicleEmpty(ent) then
+        return false, 'occupied'
+    end
+    if not (opts.allowDriver and isDriver)
+        and not Security.IsNear(src, GetEntityCoords(ent), opts.maxDistance or Config.MaxVehicleDistance) then
         return false, 'too_far'
     end
-    return true, plate
+    return true, plate, row
 end
 
 local STORE_ERR = { not_owner = 'not_owner', wrong_state = 'invalid_state', too_far = 'too_far',
+    not_driver = 'not_in_vehicle', occupied = 'occupied', invalid_source = 'invalid_request', invalid_entity = 'invalid_request',
     not_server_entity = 'vehicle_mismatch', plate_mismatch = 'vehicle_mismatch', not_tracked = 'vehicle_mismatch',
     model_mismatch = 'vehicle_mismatch' }
 
@@ -253,7 +278,7 @@ end
 --- opts = { src?, requireOwnerSrc?, requireDriver?, windowSec, evName, invoker? }
 local function adoptUnmarked(ent, plate, opts)
     local row = MySQL.single.await([[SELECT owner, model, state, managed_at,
-        (created_at IS NOT NULL AND created_at >= NOW() - INTERVAL ? SECOND) AS in_window
+        (created_at IS NOT NULL AND created_at >= NOW() - INTERVAL ? SECOND AND created_at <= NOW()) AS in_window
         FROM mdp_vehicles WHERE plate = ?]], { opts.windowSec, plate })
     local src = opts.src
     local function no(code, why)
@@ -266,8 +291,10 @@ local function adoptUnmarked(ent, plate, opts)
     if row.managed_at ~= nil then return no('vehicle_mismatch', 'already_managed') end
     if tonumber(row.in_window) ~= 1 then return no('vehicle_mismatch', 'window') end
     local bagPlate = Entity(ent).state.mdp_plate
-    local trackedAs = type(Security.IsTrackedEntity) == 'function' and Security.IsTrackedEntity(ent) or nil -- any plate
-    if trackedAs ~= nil or bagPlate ~= nil or Security.IsServerEntity(ent, plate) or Security.GetSpawnedEntity(plate) then
+    local trackedAs = Security.IsTrackedEntity(ent) -- any plate (same or other) -> already ours
+    local markedAs = type(Security.PlateOfEntity) == 'function' and Security.PlateOfEntity(ent) or nil -- AD-3
+    if trackedAs ~= nil or markedAs ~= nil or bagPlate ~= nil or Entity(ent).state.mdp_srv ~= nil
+        or Security.IsServerEntity(ent, plate) or Security.GetSpawnedEntity(plate) then
         return no('vehicle_mismatch', 'tracked_or_marked')
     end
     if Utils.NormalizePlate(GetVehicleNumberPlateText(ent) or '') ~= plate then return no('vehicle_mismatch', 'plate_mismatch') end
@@ -326,16 +353,29 @@ local function storeTarget(netId)
 end
 
 --- INSIDE the plate lock, before any side effect: re-read row, then all Security conditions (1)-(5).
-local function lockedOwnVehicle(src, ent, plate, evName, allowDriver)
+local function lockedOwnVehicle(src, ent, plate, evName, isStore)
     local row = MySQL.single.await([[SELECT plate, owner, model, state, fuel, mileage, props,
         UNIX_TIMESTAMP(COALESCE(parked_at, updated_at)) AS mileage_ts FROM mdp_vehicles WHERE plate = ?]], { plate })
     if not row or tonumber(row.state) == VS.REMOVED then return nil, 'not_owned_vehicle' end
-    local opts = { plate = plate, row = row, maxDistance = Config.MaxVehicleDistance, allowDriver = allowDriver,
-        allowKeys = Config.AllowSharedKeyStore == true }
+    -- P1-OWN-H1: the framework table is authoritative for ownership; a mismatch is rejected and resynced
+    if Config.SyncFrameworkTables then
+        local fwOwner = MDP.Vehicles.FrameworkOwner(plate)
+        if fwOwner and fwOwner ~= row.owner then
+            Security.LogReject(src, evName, 'framework_owner_mismatch', { plate = plate })
+            MDP.Vehicles.ApplyTransfer(plate, row.owner, fwOwner)
+            return nil, 'not_owner'
+        end
+    end
+    -- same option names as Security.CanStoreOwnVehicle: store = driver alone (distance skipped); park = empty + distance
+    local opts = { plate = plate, row = row, maxDistance = Config.MaxVehicleDistance, allowKeys = Config.AllowSharedKeyStore == true,
+        states = { [VS.OUT] = true }, allowDriver = isStore, requireDriver = isStore, requireEmpty = not isStore }
     local ok, res
     if type(Security.CanStoreOwnVehicle) == 'function' then
         local okC, a, b = pcall(Security.CanStoreOwnVehicle, src, ent, opts)
-        if okC then ok, res = a, b else ok, res = false, 'not_server_entity' end
+        if okC then ok, res = a, b else
+            print(('^1[mdp_garages] Security.CanStoreOwnVehicle error for %s: %s^0'):format(plate, tostring(a)))
+            ok, res = false, 'not_server_entity'
+        end
     else
         ok, res = localCanStoreOwnVehicle(src, ent, opts)
     end
@@ -486,6 +526,11 @@ RegisterCommand('mdp_regularize', function(src, args)
     Security.WithLock(plate, src, function()
         local row = MySQL.single.await('SELECT garage_id, state FROM mdp_vehicles WHERE plate = ? AND state <> ?', { plate, VS.REMOVED })
         if not row then return reply(('no vehicle %s'):format(plate)) end
+        -- M2: never a way out of the impound / retirement or around unpaid fines
+        local st = tonumber(row.state)
+        if st == VS.IMPOUNDED or st == VS.RETIRED then return reply(('%s is impounded/retired (state %d): release it the normal way'):format(plate, st)) end
+        local fines = MySQL.scalar.await("SELECT COUNT(*) FROM mdp_fines WHERE plate = ? AND paid = 0 AND channel IN ('internal', 'invoice')", { plate }) or 0
+        if fines > 0 then return reply(('%s has %d unpaid fine(s): refused'):format(plate, fines)) end
         local tracked = Security.GetSpawnedEntity(plate)
         local deleted = 0
         for _, ent in ipairs(GetAllVehicles()) do
@@ -526,10 +571,22 @@ local function parseCoords(c)
     return v, w + 0.0
 end
 
+--- Config.TrustedResources gate for the dealership exports (never our own resource).
+local function isTrusted(invoker)
+    if not invoker or invoker == GetCurrentResourceName() then return false end
+    for _, r in ipairs(Config.TrustedResources or {}) do if r == invoker then return true end end
+    return false
+end
+local function untrustedMsg(invoker)
+    local msg = ('resource "%s" is not trusted: add "%s" to Config.TrustedResources in shared/config.lua'):format(tostring(invoker), tostring(invoker))
+    print('^3[mdp_garages] ' .. msg .. '^0')
+    return msg
+end
+
 local function SpawnOwnedVehicle(plate, coords, src)
     local invoker = GetInvokingResource()
     print(('[mdp_garages] SpawnOwnedVehicle called by %s (plate %s, src %s)'):format(tostring(invoker), tostring(plate), tostring(src)))
-    if not invoker or invoker == GetCurrentResourceName() then return nil, 'invalid_source' end -- exports only
+    if not isTrusted(invoker) then return nil, 'untrusted_resource', untrustedMsg(invoker) end
     if not MDP.Ready then return nil, 'not_ready' end
     plate = type(plate) == 'string' and Utils.NormalizePlate(plate) or nil
     if not plate or not Utils.IsValidPlate(plate) then return nil, 'invalid_plate' end
@@ -548,6 +605,8 @@ local function SpawnOwnedVehicle(plate, coords, src)
         local state = tonumber(row.state)
         if state ~= VS.GARAGED and state ~= VS.OUT then return nil, 'invalid_state' end
         if Security.GetSpawnedEntity(plate) then return nil, 'already_out' end
+        local conflict = liveEntityConflict(plate) -- AD-4: pool scan, not only tracking
+        if conflict then return nil, conflict end
         if state == VS.GARAGED then
             local n = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, parked_at = NULL WHERE plate = ? AND state = ?',
                 { VS.OUT, plate, VS.GARAGED })
@@ -576,12 +635,17 @@ exports('SpawnOwnedVehicle', SpawnOwnedVehicle)
 -- Config.TrustedResources lists the invoking resource. Row created < 60 s ago, state OUT, not managed, entity not
 -- marked/tracked, plate + model match, population type 7. Then mark + track + managed_at (same core as adoption).
 ---------------------------------------------------------------------------
+local externalRate = {}
 local function RegisterExternalVehicle(netId, plate)
     local invoker = GetInvokingResource()
     print(('[mdp_garages] RegisterExternalVehicle called by %s (netId %s, plate %s)'):format(tostring(invoker), tostring(netId), tostring(plate)))
-    local trusted = false
-    for _, r in ipairs(Config.TrustedResources or {}) do if r == invoker then trusted = true break end end
-    if not invoker or invoker == GetCurrentResourceName() or not trusted then return false, 'untrusted_resource' end
+    if not isTrusted(invoker) then return false, 'untrusted_resource', untrustedMsg(invoker) end
+    -- own rate limit: 10 calls per 60 s per resource
+    local now = GetGameTimer()
+    local rl = externalRate[invoker]
+    if not rl or now - rl.start > 60000 then rl = { start = now, n = 0 }; externalRate[invoker] = rl end
+    rl.n = rl.n + 1
+    if rl.n > 10 then return false, 'rate_limited' end
     if not MDP.Ready then return false, 'not_ready' end
     plate = type(plate) == 'string' and Utils.NormalizePlate(plate) or nil
     if not plate or not Utils.IsValidPlate(plate) then return false, 'invalid_plate' end

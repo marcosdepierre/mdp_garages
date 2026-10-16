@@ -130,6 +130,7 @@ See docs/architecture.md (Phase 1 security re-review) and docs/security.md.
 - **Owner-only store/park:** only the owner's own, server-spawned vehicle can be stored/parked (keys don't count). Cars spawned before a8fda43 or by other scripts carry no server mark and are refused with "This is not the registered vehicle". Fix them with the admin command `mdp_regularize <plate>` (sends the car to its last garage, deleting the empty unmarked entity). Add `add_ace group.admin command.mdp_regularize allow`.
 
 ### Dealerships
+0. Both dealership exports (`SpawnOwnedVehicle`, `RegisterExternalVehicle`) only accept calls from resources listed in `Config.TrustedResources` (shared/config.lua), e.g. `Config.TrustedResources = { 'my_dealership' }`. Otherwise they return `untrusted_resource` and print `add "<res>" to Config.TrustedResources in shared/config.lua`.
 1. **Primary:** `local netId, err = exports.mdp_garages:SpawnOwnedVehicle(plate, vector4(x, y, z, h), src)` after `AddVehicle(owner, plate, model, props?, 'out')` (server only). The car gets the server mark and can be stored/parked later.
 2. Or `AddVehicle(owner, plate, model, props?, 'public:legion')` and the player takes it out from that garage.
 3. If your dealership spawns the car itself: the owner's **first store** adopts it (`Config.AllowFirstStoreAdoption = true`, within 30 min of `AddVehicle`, owner driving, script-spawned entity), or call `exports.mdp_garages:RegisterExternalVehicle(netId, plate)` within 60 s of `AddVehicle` after adding your resource to `Config.TrustedResources`.
