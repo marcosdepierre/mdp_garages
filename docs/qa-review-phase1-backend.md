@@ -328,3 +328,27 @@ R2-M2 (comprador offline / política de desconexión) y TR-3..TR-5 → backlog d
 
 ## Veredicto R3 (HEAD `2b60c36`)
 **NO se puede cerrar: 1 Alta (P1-OWN-R3-H1)**, la misma clase que H1 pero en la salida del garaje (takeOut/SpawnOwnedVehicle sin la comprobación del dueño en el framework). Es un arreglo de pocas líneas reutilizando el bloque de `lockedOwnVehicle`. TR-1/TR-2, R2-M1, R2-M3 y fail-closed: correctos. Medias nuevas: R3-M1 (clon + reinicio → atascado) y R3-M2 (2 filas en el framework → falla en abierto).
+
+---
+
+# Propiedad R4 (bb6397a)
+
+- Fecha: 16/10/2026, 23:30 (UTC+1). Árbol limpio de `bb6397a`. Líneas de `bb6397a`.
+- `luac54 -p`: OK. `/tmp/qa/p1/test.lua`: **35/35**. `own_r4.lua`: **50/51** (FAIL = R3-H1, sin cambios). `tr4.lua`: **11/12** (FAIL = R2-L1). `imp_r4.lua` (+4 casos v6): **13/13**.
+- El SQL de la ventana (`CASE … TIMESTAMPDIFF … GREATEST`, garages.lua:284-291) está revisado leyendo el código; no hay MySQL en el entorno de QA (R4-L2).
+
+## Casos del encargo
+| Caso | Resultado |
+|---|---|
+| Compra en un concesionario estándar ESX/QB (sin columna de fecha) y guardado < 30 min | **OK**: el sync incremental de un dueño conocido inserta `first_seen_at = NOW()` y `managed_at = NULL` → adoptable (imp_r4). |
+| Filas antiguas (existentes al subir a v6) | **OK**: columnas añadidas como NULL → `first_seen_at IS NULL` → nunca adoptables. Las filas v5 con `managed_at` NULL también dejan de ser adoptables. |
+| Filas de la importación inicial | **OK**: `managed_at = NOW()`, `first_seen_at = NULL` (imp_r4). |
+| GARAGED importado | **OK**: no adoptable. |
+| ¿Se puede fijar o reiniciar `first_seen_at`? | Solo lo escribe el `INSERT` de una matrícula **nueva** para mdp. Transferencia (`ApplyTransfer`) → no lo toca ✓. Fila del framework borrada y reinsertada → mdp la marcó REMOVED (`SyncRemovals`) → la restaura sin `first_seen_at` y con su `managed_at` → no adoptable ✓. Reinicio del recurso → los dueños conocidos persisten y no hay matrículas nuevas ✓. Instalación nueva después de la importación inicial → dueños desconocidos → primer sync no adoptable ✓. **Pero**: cambio de matrícula en el framework, givecar de admin, fila antigua que antes se saltaba y entra por un cambio de configuración, o un DELETE manual en `mdp_vehicles` → matrícula "nueva" → adoptable si está en OUT (R4-M1). |
+| Reloj y NULL | `first_seen_at` y la comparación usan `NOW()` del servidor de BD (mismo reloj) ✓. `fw_date_at` = `FROM_UNIXTIME(UNIX_TIMESTAMP(col))` (ida y vuelta en la misma sesión) ✓. `first_seen_at` NULL o futuro → no ✓. Fecha del framework NULL con columna → no adoptable ✓. |
+| Migración v6 | `hasColumn` por columna → idempotente, también si se cae entre los dos ALTER ✓. install.sql tiene las dos columnas y la versión 6 ✓. Seed: no hay backfill (NULL = no adoptable), es lo correcto. |
+| ¿Reabre M4? | **Sí, amplía su alcance** → R4-M1 (Media: solo coches propios, pero ahora en todos los concesionarios estándar). |
+| ¿Reabre la ventana de R3-H1? | No le afecta: la adopción exige `owner == src` en mdp. **R3-H1 no se ha tocado** (garages.lua solo cambia `adoptUnmarked`) → re-test: el `SpawnOwnedVehicle` del vendedor tras una venta en el framework **sigue spawneando** (own_r4 FAIL). `takeOut` igual (mismo código que en R3). |
+
+## Veredicto R4 (HEAD `bb6397a`)
+**v6 correcto en lo que promete (0 Altas nuevas). El backend de propiedad sigue SIN poder cerrarse por P1-OWN-R3-H1 (abierta, sin tocar).** Nuevas: R4-M1 (amplía M4 / filas antiguas "nuevas" por config), R4-L1 (ventana hasta ~55 min) y R4-L2 (SQL sin test).
