@@ -1,47 +1,63 @@
 -- Phase 1: vehicle props persistence + shared server spawn (takeOut and parked streamer).
--- Props validation is owned by Security (Security.SanitizeProps); this file only wraps it with a minimal fallback.
+-- Props validation authority: Security.SanitizeProps(props, dbRow, entity) -> clean, nil, json | nil, err.
 MDP.Props = {}
-local VS = Constants.VehicleState
 local MAX_PROPS_JSON = 16 * 1024
 
---- Sanitize client props for a vehicle row. Returns cleanProps|nil, err.
---- dbRow: { plate, model, mileage, fuel, ... } ; entityModel: GetEntityModel(veh) (server-read)
-function MDP.Props.Sanitize(props, dbRow, entityModel)
-    if props == nil then return nil, nil end -- props are optional; keep DB props
-    if type(props) ~= 'table' then return nil, 'invalid_props' end
-    if Security.SanitizeProps then
-        local row = {}
-        for k, v in pairs(dbRow) do row[k] = v end
-        row.entityModel = entityModel
-        local ok, clean, err = pcall(Security.SanitizeProps, props, row)
-        if not ok then return nil, 'invalid_props' end
-        if not clean then return nil, err or 'invalid_props' end
-        return clean
-    end
-    -- TODO(security): minimal fallback until Security.SanitizeProps lands (no field whitelist here on purpose).
-    local okE, encoded = pcall(json.encode, props)
-    if not okE or #encoded > MAX_PROPS_JSON then return nil, 'invalid_props' end
-    if props.model ~= nil and Utils.ModelHash(props.model) ~= entityModel then return nil, 'invalid_props' end
-    props.plate = dbRow.plate -- server plate always wins
-    return props
+local function clampFuel(v)
+    if Bridge.FuelCommon and Bridge.FuelCommon.Clamp then return Bridge.FuelCommon.Clamp(v) end
+    v = tonumber(v) or 100.0; if v ~= v then v = 100.0 end
+    return math.max(0.0, math.min(100.0, v))
 end
 
-local function fuelServerCapable()
+--- Health clamp for every save (M4). kind = 'engine' | 'body'.
+function MDP.Props.Health(kind, v)
+    if Security.ClampHealth then return Security.ClampHealth(kind, v) end
+    v = tonumber(v); if not v or v ~= v then return 1000.0 end
+    return math.max(0.0, math.min(1000.0, v))
+end
+
+--- L4: coords from an entity are only stored if finite and inside the map.
+function MDP.Props.ValidCoords(c)
+    if not c then return false end
+    for _, v in ipairs({ c.x, c.y, c.z }) do
+        if type(v) ~= 'number' or v ~= v or v == math.huge or v == -math.huge then return false end
+    end
+    return math.abs(c.x) <= 10000 and math.abs(c.y) <= 10000 and c.z > -200 and c.z < 3000
+end
+
+--- Sanitize client props. Returns clean, json | nil, err | nil, nil (no props sent: keep DB props).
+--- dbRow must contain plate, model, mileage. Call INSIDE the plate lock (H2).
+function MDP.Props.Sanitize(props, dbRow, veh)
+    if props == nil then return nil, nil end
+    if type(props) ~= 'table' then return nil, 'props_not_table' end
+    if Security.SanitizeProps then
+        local ok, clean, err, encoded = pcall(Security.SanitizeProps, props, dbRow, veh)
+        if not ok then return nil, 'sanitize_error' end
+        if not clean then return nil, err or 'invalid_props' end
+        return clean, encoded or json.encode(clean)
+    end
+    -- TODO(security): minimal guard only if Security.SanitizeProps is missing (older security.lua)
+    props.plate = dbRow.plate
+    local okE, encoded = pcall(json.encode, props)
+    if not okE or #encoded > MAX_PROPS_JSON then return nil, 'props_too_large' end
+    if props.model ~= nil and veh and Utils.ModelHash(props.model) ~= GetEntityModel(veh) then return nil, 'model_mismatch' end
+    return props, encoded
+end
+
+function MDP.Props.FuelServerCapable()
     return Bridge.Fuel and type(Bridge.Fuel.ServerCapable) == 'function' and Bridge.Fuel.ServerCapable() == true
 end
-MDP.Props.FuelServerCapable = fuelServerCapable
 
---- Fuel to persist on store: server adapter if capable (ox_fuel), else client value clamped 0-100 and
---- never above last DB value + 2 (anti refuel-by-store).
+--- Fuel to persist: server state bag when capable (ox_fuel), else client value clamped 0-100 and <= DB + 2.
 function MDP.Props.ResolveFuel(veh, clientFuel, dbFuel)
     dbFuel = tonumber(dbFuel) or 100
-    if fuelServerCapable() and Bridge.Fuel.GetFuel then
-        local ok, f = pcall(Bridge.Fuel.GetFuel, veh)
-        if ok and tonumber(f) then return math.max(0, math.min(100, tonumber(f))) end
+    if MDP.Props.FuelServerCapable() then
+        local f = tonumber(Entity(veh).state.fuel)
+        if f then return clampFuel(f) end
     end
     local f = tonumber(clientFuel)
     if not f or f ~= f then return dbFuel end
-    return math.max(0, math.min(100, f, dbFuel + 2))
+    return math.min(clampFuel(f), dbFuel + 2)
 end
 
 --- Mileage (km) never decreases; per-store increase capped by Config.MaxMileageDeltaKm.
@@ -52,42 +68,58 @@ function MDP.Props.ResolveMileage(clientKm, dbKm)
     return math.min(v, dbKm + (Config.MaxMileageDeltaKm or 300))
 end
 
---- Decode DB props JSON safely.
+--- DB props JSON -> table (L2: oversized blobs are ignored, never replicated).
 function MDP.Props.Decode(raw)
-    if type(raw) ~= 'string' or raw == '' then return nil end
+    if type(raw) ~= 'string' or raw == '' or #raw > MAX_PROPS_JSON then return nil end
     local ok, t = pcall(json.decode, raw)
     return (ok and type(t) == 'table') and t or nil
 end
 
---- Server spawn used by takeOut and the parked streamer. Caller holds the plate lock and has
---- already checked GetSpawnedEntity(plate) == nil. Returns veh, netId | nil, 'spawn_failed'.
---- row: { plate, model, vtype, props (json), fuel, engine, body }
-function MDP.Props.SpawnVehicle(row, x, y, z, heading, ownerSrc)
+--- Hand props to the entity owner: Integrations' Bridge.Props.RequestApply (confirm/timeout), else 'mdp:props' bag.
+function MDP.Props.RequestApply(veh, propsJson)
+    if Bridge.Props and type(Bridge.Props.RequestApply) == 'function' then
+        local ok, err = pcall(Bridge.Props.RequestApply, veh, propsJson)
+        if ok then return end
+        print('^3[mdp_garages] Bridge.Props.RequestApply failed: ' .. tostring(err) .. ' (state bag fallback)^0')
+    end
+    Entity(veh).state:set('mdp:props', propsJson, true)
+end
+
+local function doSpawn(row, x, y, z, heading)
     local vtype = Utils.IsValidVehicleType(row.vtype) and row.vtype or 'automobile'
-    local veh = CreateVehicleServerSetter(Utils.ModelHash(row.model), vtype, x, y, z, heading or 0.0)
+    local veh = CreateVehicleServerSetter(Utils.ModelHash(row.model), vtype, x + 0.0, y + 0.0, z + 0.0, (heading or 0.0) + 0.0)
     local t = GetGameTimer() + 3000
     while (not veh or veh == 0 or not DoesEntityExist(veh)) and GetGameTimer() < t do Wait(50) end
-    if not veh or veh == 0 or not DoesEntityExist(veh) then return nil, 'spawn_failed' end
+    if not veh or veh == 0 or not DoesEntityExist(veh) then return nil end
     SetVehicleNumberPlateText(veh, row.plate)
-    local fuel = tonumber(row.fuel) or 100
+    -- one props payload: ox_lib props from DB + fuel/health from DB columns (applied by the entity owner)
+    local props = MDP.Props.Decode(row.props) or {}
+    props.plate = row.plate
+    props.fuelLevel = clampFuel(row.fuel)
+    props.engineHealth = MDP.Props.Health('engine', row.engine)
+    props.bodyHealth = MDP.Props.Health('body', row.body)
     local bag = Entity(veh).state
     bag:set('mdp_plate', row.plate, true)
-    -- client applier (entity owner) applies props + health (+ fuel when the fuel resource is client-side)
-    bag:set('mdp_props', {
-        props = MDP.Props.Decode(row.props),
-        engine = tonumber(row.engine) or 1000.0,
-        body = tonumber(row.body) or 1000.0,
-        fuel = fuel,
-        mileage = tonumber(row.mileage) or 0.0, -- km; client odometer base
-        fuelOnClient = not fuelServerCapable(),
-    }, true)
-    if fuelServerCapable() and Bridge.Fuel.SetFuel then pcall(Bridge.Fuel.SetFuel, veh, fuel) end
+    bag:set('mdp_mileage', tonumber(row.mileage) or 0.0, true) -- km, odometer base for the driver
+    if MDP.Props.FuelServerCapable() then bag:set('fuel', props.fuelLevel, true) end
+    MDP.Props.RequestApply(veh, json.encode(props))
+    return veh
+end
+
+--- Server spawn. Caller holds the plate lock and checked GetSpawnedEntity(plate) == nil.
+--- Never throws (H1): returns veh, netId | nil, 'spawn_failed'.
+function MDP.Props.SpawnVehicle(row, x, y, z, heading, ownerSrc)
+    local ok, veh = pcall(doSpawn, row, x, y, z, heading)
+    if not ok or not veh then
+        if not ok then print(('^1[mdp_garages] spawn error %s: %s^0'):format(tostring(row.plate), tostring(veh))) end
+        return nil, 'spawn_failed'
+    end
     local netId = NetworkGetNetworkIdFromEntity(veh)
     Security.TrackSpawn(row.plate, netId, ownerSrc)
     return veh, netId
 end
 
---- Give keys AFTER the entity exists (qbx_vehiclekeys needs the entity). Never throws.
+--- Permanent keys AFTER the entity exists (qbx_vehiclekeys needs the entity). Never throws.
 function MDP.Props.GiveKeys(src, veh, plate)
     if not (Bridge.Keys and type(Bridge.Keys.GiveKeys) == 'function') then return false end
     local ok, res = pcall(Bridge.Keys.GiveKeys, src, veh or plate)
@@ -98,4 +130,10 @@ function MDP.Props.GiveKeys(src, veh, plate)
     return true
 end
 
-local _ = VS
+--- Guarded optional bridge hooks: MDP.Props.Hook(Bridge.FrameworkSync, 'OnStore', ...). Never throws.
+function MDP.Props.Hook(tbl, fn, ...)
+    if type(tbl) == 'table' and type(tbl[fn]) == 'function' then
+        local ok, err = pcall(tbl[fn], ...)
+        if not ok then print(('^3[mdp_garages] hook %s failed: %s^0'):format(fn, tostring(err))) end
+    end
+end

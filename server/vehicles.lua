@@ -28,6 +28,14 @@ local function columnExists(tbl, col)
 end
 Vehicles.TableExists, Vehicles.ColumnExists = tableExists, columnExists
 
+-- L2: framework props above 16 KB are not imported (they would be replicated by state bag)
+local function capProps(raw, plate)
+    if type(raw) == 'string' and #raw > 16384 then
+        print(('^3[mdp_garages] import: props of %s exceed 16 KB, not imported^0'):format(tostring(plate))); return nil
+    end
+    return raw
+end
+
 local function modelFromProps(raw)
     local ok, props = pcall(json.decode, raw or '{}')
     if ok and type(props) == 'table' and props.model then return tostring(props.model) end
@@ -55,7 +63,7 @@ function Vehicles.MapFrameworkRow(framework, r)
         end
         gid = Utils.ResolveGarageId(gid, plate)
         if state == VS.IMPOUNDED then gid = nil end
-        return { plate = plate, owner = r.owner, model = modelFromProps(r.vehicle) or 'unknown', props = r.vehicle,
+        return { plate = plate, owner = r.owner, model = modelFromProps(r.vehicle) or 'unknown', props = capProps(r.vehicle, plate),
                  vtype = (r.type == 'boat' and 'boat') or ((r.type == 'airplane' or r.type == 'plane') and 'plane') or (r.type == 'helicopter' and 'heli') or 'automobile',
                  state = state, garage_id = gid, fuel = 100, engine = 1000, body = 1000 }
     else
@@ -63,7 +71,7 @@ function Vehicles.MapFrameworkRow(framework, r)
         local qs = tonumber(r.state)
         local state = (qs == 2 and VS.IMPOUNDED) or (qs == 0 and VS.OUT) or VS.GARAGED
         local gid = state ~= VS.IMPOUNDED and Utils.ResolveGarageId(r.garage and ('public:' .. tostring(r.garage)) or nil, plate) or nil
-        return { plate = plate, owner = r.citizenid, model = tostring(r.vehicle or 'unknown'), props = r.mods, vtype = 'automobile',
+        return { plate = plate, owner = r.citizenid, model = tostring(r.vehicle or 'unknown'), props = capProps(r.mods, plate), vtype = 'automobile',
                  state = state, garage_id = gid, fuel = tonumber(r.fuel) or 100,
                  engine = tonumber(r.engine) or 1000, body = tonumber(r.body) or 1000 }
     end
@@ -248,7 +256,14 @@ function Vehicles.AddVehicle(owner, plate, model, props, garageId)
         if type(props) == 'table' then propsJson = json.encode(props)
         elseif type(props) == 'string' then propsJson = props
         else return false, 'invalid_props' end
-        if #propsJson > 65535 then return false, 'invalid_props' end
+        if #propsJson > 16384 then return false, 'invalid_props' end -- L1: same cap as the replicated state bag
+        if Security.SanitizeProps then
+            local okD, t = pcall(json.decode, propsJson)
+            local clean, _, enc
+            if okD and type(t) == 'table' then clean, _, enc = Security.SanitizeProps(t, { plate = plate, model = model }) end
+            if not clean then return false, 'invalid_props' end
+            propsJson = enc
+        end
     end
     -- garageId = 'out': the vehicle is already spawned in the world (e.g. dealership test-drive/delivery)
     local initialState = VS.GARAGED

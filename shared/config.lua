@@ -58,6 +58,8 @@ Config.Security = { ownedTable = 'mdp_vehicles', despawnOnDropMs = nil }
 -- On player load, import plates missing from mdp_vehicles out of owned_vehicles / player_vehicles
 -- (INSERT IGNORE, originals untouched) so dealership purchases appear · boolean · true
 Config.SyncFrameworkTables = true
+-- Mirror mdp_vehicles -> framework tables on store/spawn/impound (Integrations bridge/vehicle/framework_sync.lua; UPDATE only) · boolean · defaults to SyncFrameworkTables
+Config.MirrorFrameworkTables = Config.SyncFrameworkTables
 -- During a player's sync, SOFT-DELETE (state 5 REMOVED) their vehicles that no longer exist in the framework table
 -- (fines/impound/keys kept; despawned only if empty, else deferred; restored if the plate reappears). Only rows with source='framework' (imported by sync/migrate), only after a successful query;
 -- skipped with a warning if the framework returns 0 rows while framework-sourced vehicles exist · boolean · true
@@ -101,6 +103,8 @@ Config.DefaultImpound = 'impound:lspd'
 -- Phase 1 streamer: tick interval (ms) over player coords, and full registry refresh from DB (ms). Defaults 1500 / 30000.
 Config.StreamerTickMs = 1500
 Config.StreamerRefreshMs = 30000
+-- Max parked-vehicle spawns started per streamer tick (avoids entity spikes) · integer · 5
+Config.StreamerMaxSpawnsPerTick = 5
 -- Max km accepted per store over the DB odometer (anti-tamper; mileage never decreases). Default 300.
 Config.MaxMileageDeltaKm = 300
 

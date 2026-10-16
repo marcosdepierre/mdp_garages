@@ -7,6 +7,7 @@ local RES = GetCurrentResourceName()
 
 local function saveEntityCoords(veh, plate)
     local c, h = GetEntityCoords(veh), GetEntityHeading(veh)
+    if not MDP.Props.ValidCoords(c) then return end -- L4
     MySQL.update.await('UPDATE mdp_vehicles SET coords = ?, heading = ? WHERE plate = ? AND state = ?',
         { json.encode({ x = c.x, y = c.y, z = c.z }), h, plate, VS.OUT })
 end
@@ -118,9 +119,9 @@ local function onStart()
                 -- R5-2: 'garage' never deletes an occupied vehicle -> falls back to the 'park' logic
                 if mode == 'garage' and Utils.IsVehicleEmpty(ent) then
                     local n = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, garage_id = ?, engine = ?, body = ?, coords = NULL WHERE plate = ? AND state = ?',
-                        { VS.GARAGED, Config.DefaultGarage, GetVehicleEngineHealth(ent), GetVehicleBodyHealth(ent), plate, VS.OUT })
+                        { VS.GARAGED, Config.DefaultGarage, MDP.Props.Health('engine', GetVehicleEngineHealth(ent)), MDP.Props.Health('body', GetVehicleBodyHealth(ent)), plate, VS.OUT })
                     if n == 1 then Security.UntrackSpawn(plate); DeleteEntity(ent); wanted[plate] = nil; garaged = garaged + 1 end
-                elseif Utils.IsVehicleEmpty(ent) then
+                elseif Utils.IsVehicleEmpty(ent) and MDP.Props.ValidCoords(c) then
                     local n = MySQL.update.await([[UPDATE mdp_vehicles SET state = ?, coords = ?, heading = ?, parked_at = CURRENT_TIMESTAMP
                         WHERE plate = ? AND state = ?]], { VS.PARKED_WORLD, json.encode({ x = c.x, y = c.y, z = c.z }), h, plate, VS.OUT })
                     if n == 1 then parked = parked + 1 end
@@ -211,7 +212,9 @@ end)
 -- Security has already released the player's locks and kept their spawns tracked with owner = nil.
 -- Applies to each tracked vehicle of the player that they were DRIVING (or, if the ped is already gone, that has no driver).
 ---------------------------------------------------------------------------
-local function healthOf(veh) return GetVehicleEngineHealth(veh), GetVehicleBodyHealth(veh) end
+local function healthOf(veh) -- M4
+    return MDP.Props.Health('engine', GetVehicleEngineHealth(veh)), MDP.Props.Health('body', GetVehicleBodyHealth(veh))
+end
 
 local function toGarage(plate, veh)
     if not Utils.IsVehicleEmpty(veh) then return false end -- R5-2: never delete with someone inside
@@ -225,6 +228,7 @@ end
 local function applyPolicy(plate, veh, mode, droppedPed)
     local c, h = GetEntityCoords(veh), GetEntityHeading(veh)
     local engine, body = healthOf(veh)
+    if mode == 'keep' and not MDP.Props.ValidCoords(c) then mode = 'garage' end -- L4: never park at NaN/out-of-map coords
     -- R5-2: never delete a vehicle with someone (other than the dropping player) inside -> 'keep'/park logic
     if (mode == 'garage' or mode == 'impound') and not Utils.IsVehicleEmpty(veh, droppedPed) then
         print(('^3[mdp_garages] disconnect policy %s for %s: vehicle occupied, parking it instead^0'):format(mode, plate))
@@ -237,10 +241,11 @@ local function applyPolicy(plate, veh, mode, droppedPed)
         local n = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, garage_id = ?, engine = ?, body = ?, coords = NULL, parked_at = NULL WHERE plate = ? AND state = ?',
             { VS.IMPOUNDED, Config.DefaultImpound, engine, body, plate, VS.OUT })
         if n == 1 then
-            MySQL.insert.await([[INSERT INTO mdp_impound (plate, reason, officer, fee, release_after, location)
+            local impoundId = MySQL.insert.await([[INSERT INTO mdp_impound (plate, reason, officer, fee, release_after, location)
                 VALUES (?, ?, 'system:disconnect', ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? HOUR), ?)]],
                 { plate, reason.label, math.tointeger(reason.fee) or 0, math.tointeger(reason.hours) or 0, Config.DefaultImpound })
             Security.UntrackSpawn(plate); DeleteEntity(veh)
+            MDP.Props.Hook(Bridge.FrameworkSync, 'OnImpound', plate, impoundId)
         end
     else -- keep: parked in place, stays tracked (owner nil) until the owner reconnects (ClaimSpawn)
         MySQL.update.await([[UPDATE mdp_vehicles SET state = ?, coords = ?, heading = ?, engine = ?, body = ?,

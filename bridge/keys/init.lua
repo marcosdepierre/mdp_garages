@@ -1,6 +1,6 @@
 -- keys loader (interface only). Adapters are written by Integrations: see docs/integrations.md.
 -- Config.Keys = 'auto' or a resource name. Priority when auto: 'qbx_vehiclekeys', 'qb-vehiclekeys'
-local PRIORITY = { 'qbx_vehiclekeys', 'qb-vehiclekeys' }
+local PRIORITY = { 'qbx_vehiclekeys', 'qb-vehiclekeys', 'wasabi_carlock', 'MrNewbVehicleKeys', 'qs-vehiclekeys' }
 Bridge.Keys = Bridge.Keys or {}
 
 function Bridge.Keys.Get()
