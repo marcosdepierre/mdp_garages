@@ -389,3 +389,8 @@ Restart: recovery runs first (R5-3/R6-1); adopted state-2 entities stay tracked.
 - **Despawn (N9):** the row is always re-read inside the lock (`state = 2`), registry entry or not.
 - **Health range:** `Security.ClampHealth` everywhere: engine **-4000..1000**, body 0..1000 (stored as such; the NUI must clamp to 0 for display).
 - **Spawn (N3):** the entity handle is kept from creation, so an error after `CreateVehicleServerSetter` deletes it.
+
+### NUI additions (Frontend f6f2495)
+- **`open` message** also carries `lang` (= `Config.Locale`, e.g. `'en'`/`'es'`; the NUI uses it for number/date formatting) besides `locale`. `data` may come **without `vehicles`**: the NUI then calls the `getVehicles` callback itself.
+- **`toast` action** (works without NUI focus, panel may be closed): `SendNUIMessage({action='toast', id, kind, titleKey?, title?, description?, error?, locale, lang})`. Lua export **`exports.mdp_garages:GarageToast(t)`** with `t = { id?: string, kind: 'loading'|'success'|'error', titleKey?: string (ui locale key, translated by the NUI), title?: string (already translated), description?: string, error?: string (contract error code, normalized with Utils.ErrorCode) }`. The same `id` replaces the previous toast (loading → result). Used by `client/zones.lua` for store/park feedback (`storing`, `parking`, `taken_out`, …).
+- **Health display:** the server stores engine -4000..1000 (`Security.ClampHealth`); the NUI clamps engine/body to 0..1000 before showing percentages.
