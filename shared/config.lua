@@ -60,6 +60,8 @@ Config.Security = { ownedTable = 'mdp_vehicles', despawnOnDropMs = nil }
 Config.SyncFrameworkTables = true
 -- Mirror mdp_vehicles -> framework tables on store/spawn/impound (Integrations bridge/vehicle/framework_sync.lua; UPDATE only) · boolean · defaults to SyncFrameworkTables
 Config.MirrorFrameworkTables = Config.SyncFrameworkTables
+-- Remove TEMPORARY keys when a vehicle is stored in a garage (state 1); kept for world parking (Bridge.Keys.OnStore) · boolean · true
+Config.RemoveKeysOnStore = true
 -- During a player's sync, SOFT-DELETE (state 5 REMOVED) their vehicles that no longer exist in the framework table
 -- (fines/impound/keys kept; despawned only if empty, else deferred; restored if the plate reappears). Only rows with source='framework' (imported by sync/migrate), only after a successful query;
 -- skipped with a warning if the framework returns 0 rows while framework-sourced vehicles exist · boolean · true

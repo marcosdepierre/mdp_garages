@@ -1,6 +1,6 @@
 -- Phase 1 client glue: km odometer only. Props are applied by Integrations' bridge/vehicle/props.lua
 -- (state bag 'mdp:props' / Bridge.Props.RequestApply with confirm/timeout); there is no second applier here.
--- Odometer: km driven per plate while we drive it; base = state bag mdp_mileage (km) set by the server on spawn.
+-- Odometer: km driven per plate while we drive it; base = state bag mdp:mileage (km) set by the server on spawn.
 local Odo = { plate = nil, km = 0.0 }
 CreateThread(function()
     local last
@@ -10,7 +10,7 @@ CreateThread(function()
         if veh ~= 0 and GetPedInVehicleSeat(veh, -1) == ped then
             local plate = Utils.NormalizePlate(GetVehicleNumberPlateText(veh))
             if plate ~= Odo.plate then
-                Odo.plate, Odo.km, last = plate, tonumber(Entity(veh).state.mdp_mileage) or 0.0, nil
+                Odo.plate, Odo.km, last = plate, tonumber(Entity(veh).state['mdp:mileage']) or 0.0, nil
             end
             local pos = GetEntityCoords(veh)
             if last then

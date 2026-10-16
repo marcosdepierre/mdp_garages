@@ -76,16 +76,16 @@ function MDP.Props.Decode(raw)
 end
 
 --- Hand props to the entity owner: Integrations' Bridge.Props.RequestApply (confirm/timeout), else 'mdp:props' bag.
-function MDP.Props.RequestApply(veh, propsJson)
+function MDP.Props.RequestApply(veh, payload, src)
     if Bridge.Props and type(Bridge.Props.RequestApply) == 'function' then
-        local ok, armed = pcall(Bridge.Props.RequestApply, veh, propsJson)
+        local ok, armed = pcall(Bridge.Props.RequestApply, veh, payload, src)
         if ok and armed ~= false then return end
         print('^3[mdp_garages] Bridge.Props.RequestApply failed: ' .. tostring(armed) .. ' (state bag fallback)^0')
     end
-    Entity(veh).state:set('mdp:props', propsJson, true)
+    Entity(veh).state:set('mdp:props', json.encode(payload), true)
 end
 
-local function doSpawn(row, x, y, z, heading)
+local function doSpawn(row, x, y, z, heading, ownerSrc)
     local vtype = Utils.IsValidVehicleType(row.vtype) and row.vtype or 'automobile'
     local veh = CreateVehicleServerSetter(Utils.ModelHash(row.model), vtype, x + 0.0, y + 0.0, z + 0.0, (heading or 0.0) + 0.0)
     local t = GetGameTimer() + 3000
@@ -98,19 +98,19 @@ local function doSpawn(row, x, y, z, heading)
     local fuel = clampFuel(row.fuel)
     local bag = Entity(veh).state
     bag:set('mdp_plate', row.plate, true)
-    bag:set('mdp_mileage', tonumber(row.mileage) or 0.0, true) -- km, odometer base for the driver
+    bag:set('mdp:mileage', tonumber(row.mileage) or 0.0, true) -- km, odometer base for the driver
     if MDP.Props.FuelServerCapable() then bag:set('fuel', fuel, true) end
-    MDP.Props.RequestApply(veh, json.encode({
+    MDP.Props.RequestApply(veh, {
         props = props, engine = MDP.Props.Health('engine', row.engine), body = MDP.Props.Health('body', row.body),
         fuel = fuel, fuelOnClient = not MDP.Props.FuelServerCapable(), mileage = tonumber(row.mileage) or 0.0,
-    }))
+    }, ownerSrc)
     return veh
 end
 
 --- Server spawn. Caller holds the plate lock and checked GetSpawnedEntity(plate) == nil.
 --- Never throws (H1): returns veh, netId | nil, 'spawn_failed'.
 function MDP.Props.SpawnVehicle(row, x, y, z, heading, ownerSrc)
-    local ok, veh = pcall(doSpawn, row, x, y, z, heading)
+    local ok, veh = pcall(doSpawn, row, x, y, z, heading, ownerSrc)
     if not ok or not veh then
         if not ok then print(('^1[mdp_garages] spawn error %s: %s^0'):format(tostring(row.plate), tostring(veh))) end
         return nil, 'spawn_failed'
