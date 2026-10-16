@@ -61,6 +61,7 @@ Locales.es = {
         err_not_owner = 'Este vehículo no es tuyo',
         err_not_owned_vehicle = 'Solo puedes guardar tus propios vehículos',
         err_vehicle_mismatch = 'Este no es el vehículo registrado',
+        err_duplicate_plate = 'Esta matrícula está registrada más de una vez; contacta con un admin',
         err_too_far = 'Estás demasiado lejos',
         err_rate_limited = 'Espera un momento e inténtalo de nuevo',
         err_locked = 'Este vehículo está ocupado, inténtalo de nuevo',

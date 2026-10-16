@@ -141,8 +141,26 @@ local function onStart()
         -- R5-3: adopt only if exactly ONE live entity matches plate AND model; duplicates -> adopt none, keep them
         local ent, matches = Utils.UniqueWorldVehicle(world, plate, Utils.ModelHash(r.model))
         if matches > 1 then
-            dupPlates[plate] = true
-            print(('^3[mdp_garages] restart: %d world entities match %s (plate+model); none adopted, duplicates left untouched^0'):format(matches, plate))
+            -- R3-M1: several plate+model matches -> adopt only the ONE carrying a valid server mark (Security.IsServerEntity:
+            -- secret-keyed tag, non-replicated bag); unmarked clones: empty -> deleted, occupied -> ignored. None marked ->
+            -- adopt none, row stays OUT (see backlog gap P1-OWN-M1).
+            local marked, clones = {}, {}
+            for _, veh in ipairs(world[plate] or {}) do
+                if Utils.SameModel(GetEntityModel(veh), Utils.ModelHash(r.model)) then
+                    if Security.IsServerEntity(veh, plate) then marked[#marked + 1] = veh else clones[#clones + 1] = veh end
+                end
+            end
+            if #marked == 1 then
+                ent = marked[1]
+                for _, c in ipairs(clones) do
+                    if Utils.IsVehicleEmpty(c) then DeleteEntity(c)
+                    else print(('^3[mdp_garages] restart: occupied unmarked clone of %s ignored^0'):format(plate)) end
+                end
+                print(('^3[mdp_garages] restart: %s had %d matches; adopted the server-marked one, %d unmarked clone(s) handled^0'):format(plate, matches, #clones))
+            else
+                dupPlates[plate] = true
+                print(('^3[mdp_garages] restart: %d world entities match %s (%d marked); none adopted, row kept OUT^0'):format(matches, plate, #marked))
+            end
         end
         if ent then
             -- N1: Security.CanAdopt (server-marked entity, model, empty, within tolerance of DB coords).

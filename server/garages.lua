@@ -83,6 +83,26 @@ local function vehicleOccupied(veh)
     return false
 end
 
+--- P1-OWN-H1 / R3-H1 / R3-M2: shared framework-owner check for store, park, takeOut and SpawnOwnedVehicle.
+--- MUST run inside WithLock(plate). The framework table is authoritative: a different owner -> transfer applied now
+--- (reusing the held lock) and not_owner; 2+ framework rows for the plate -> duplicate_plate + admin log.
+local function checkFrameworkOwner(src, plate, mdpOwner, evName)
+    if not Config.SyncFrameworkTables then return true end
+    local fwOwner, why = MDP.Vehicles.FrameworkOwner(plate)
+    if why == 'ambiguous' then
+        print(('^1[mdp_garages] ADMIN: plate %s has several rows in the framework vehicle table; %s refused until fixed^0')
+            :format(plate, tostring(evName)))
+        Security.LogReject(src or 0, evName, 'duplicate_plate', { plate = plate })
+        return false, 'duplicate_plate'
+    end
+    if fwOwner and fwOwner ~= mdpOwner then
+        Security.LogReject(src or 0, evName, 'framework_owner_mismatch', { plate = plate })
+        MDP.Vehicles.ApplyTransfer(plate, mdpOwner, fwOwner, true) -- caller holds the plate lock
+        return false, 'not_owner'
+    end
+    return true
+end
+
 --- P1-OWN-H2/AD-4: any live entity carrying this plate (pool scan), excluding `except`. Returns 'already_out' for a
 --- server-marked one, 'vehicle_mismatch' for an unmarked one, nil if none.
 --- R2-M1: for a GARAGED row unmarked plate clones are ignored (anyone can clone a plate to grief the owner).
@@ -119,6 +139,9 @@ MDP.Callback('mdp_garages:takeOut', {
         local vtype = Utils.IsValidVehicleType(row.vtype) and row.vtype or 'automobile'
         if not Utils.GarageAllowsType(garage, vtype) then return { ok = false, error = 'wrong_vehicle_type' } end
         if unpaidFinesBlocked(row.owner) then return { ok = false, error = 'unpaid_fines' } end
+        -- R3-H1: framework owner first (sold but not yet synced -> transfer now, refuse)
+        local fwOk, fwErr = checkFrameworkOwner(src, plate, row.owner, 'mdp_garages:takeOut')
+        if not fwOk then return { ok = false, error = fwErr } end
         -- TR-1: ownership re-checked inside the lock (a transfer may have happened since the pre-lock check)
         if not Security.IsOwner(src, plate, true) then return { ok = false, error = 'not_owner' } end
         local tracked = Security.GetSpawnedEntity(plate)
@@ -369,15 +392,8 @@ local function lockedOwnVehicle(src, ent, plate, evName, isStore)
     local row = MySQL.single.await([[SELECT plate, owner, model, state, fuel, mileage, props,
         UNIX_TIMESTAMP(COALESCE(parked_at, updated_at)) AS mileage_ts FROM mdp_vehicles WHERE plate = ?]], { plate })
     if not row or tonumber(row.state) == VS.REMOVED then return nil, 'not_owned_vehicle' end
-    -- P1-OWN-H1: the framework table is authoritative for ownership; a mismatch is rejected and resynced
-    if Config.SyncFrameworkTables then
-        local fwOwner = MDP.Vehicles.FrameworkOwner(plate)
-        if fwOwner and fwOwner ~= row.owner then
-            Security.LogReject(src, evName, 'framework_owner_mismatch', { plate = plate })
-            MDP.Vehicles.ApplyTransfer(plate, row.owner, fwOwner, true) -- we already hold the plate lock
-            return nil, 'not_owner'
-        end
-    end
+    local fwOk, fwErr = checkFrameworkOwner(src, plate, row.owner, evName)
+    if not fwOk then return nil, fwErr end
     -- same option names as Security.CanStoreOwnVehicle: store = driver alone (distance skipped); park = empty + distance
     local opts = { plate = plate, row = row, maxDistance = Config.MaxVehicleDistance, allowKeys = Config.AllowSharedKeyStore == true,
         states = { [VS.OUT] = true }, allowDriver = isStore, requireDriver = isStore, requireEmpty = not isStore }
@@ -614,6 +630,8 @@ local function SpawnOwnedVehicle(plate, coords, src)
         local row = MySQL.single.await([[SELECT plate, owner, model, vtype, props, state, garage_id, fuel, engine, body, mileage
             FROM mdp_vehicles WHERE plate = ?]], { plate })
         if not row or tonumber(row.state) == VS.REMOVED then return nil, 'not_owned_vehicle' end
+        local fwOk, fwErr = checkFrameworkOwner(src, plate, row.owner, 'export:SpawnOwnedVehicle') -- R3-H1
+        if not fwOk then return nil, fwErr end
         if row.owner ~= ident then return nil, 'not_owner' end
         local state = tonumber(row.state)
         if state ~= VS.GARAGED and state ~= VS.OUT then return nil, 'invalid_state' end

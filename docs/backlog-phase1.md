@@ -26,6 +26,11 @@
 | TR-4 (fase 2) | Parcial | Varias filas del framework para una matrícula: hoy se omite el chequeo y no se transfiere (log). Falta una herramienta de admin para resolverlo. |
 | TR-5 (fase 2) | Parcial | Guard old == new hecho. Falta log AUDIT de cada transferencia (dueño antiguo, nuevo, origen) con un helper de Security. |
 | R2-M2 (fase 2) | Pendiente | Diferido por Senior a fase 2 (ver docs/qa-review-phase1-backend.md). |
+| R2-L1 (Baja) | Pendiente | `FrameworkOwner`: una matrícula del framework con doble espacio interno no coincide con la normalizada (búsqueda indexada exacta). |
+| R3-L (índice QB) | Pendiente | Comprobar/recomendar índice en `player_vehicles.plate` (QB/Qbox) para la búsqueda indexada; ESX `owned_vehicles.plate` es PK. |
+| P1R3-L1 (Baja) | Pendiente | Coche OUT sin marca y vacío borrado al arrancar → GARAGED con props de la BD (se pierde tuning de calle). |
+| P1R3-L2 (Baja) | Aceptado | Dueño de red puede escribir `mdp_srv` con strict mode desactivado (DoS de su propio coche); mitigado con `sv_stateBagStrictMode`. |
+| P1-OWN-M1 / R3-M1 hueco | Pendiente | Coche sin marca (o clones sin ninguno marcado) que queda OUT tras reiniciar: el dueño no puede guardarlo sin debilitar las reglas (`vehicle_mismatch`) fuera de la ventana de adopción; salida: `/mdp_regularize` o reinicio con el coche vacío. Falta una re-adopción segura diseñada con Security. |
 
 ## Desde QA fase 1 backend (16/10/2026, HEAD ac77923) — ver docs/qa-review-phase1-backend.md
 
