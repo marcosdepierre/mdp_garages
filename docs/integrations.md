@@ -2,6 +2,12 @@
 
 Leyenda: ✅ verificado contra el código/docs oficiales (16/10/2026) · ⚠️ NO verificado (basado en uso habitual; confirmar antes de publicar).
 
+> ⚠️ **IMPORTANTE — `Config.TrustedResources` está VACÍO por defecto.** Si un concesionario externo usa `exports.mdp_garages:SpawnOwnedVehicle` o `exports.mdp_garages:RegisterExternalVehicle`, hay que añadir el nombre exacto de su recurso en `shared/config.lua`:
+> ```lua
+> Config.TrustedResources = { 'qbx_vehicleshop', 'qb-vehicleshop', 'esx_vehicleshop' }
+> ```
+> Si no se añade, ambos exports devuelven `untrusted_resource` y **solo funciona la adopción en el primer guardado** (30 min, `Config.AllowFirstStoreAdoption`).
+
 Convenciones comunes a todos los adaptadores:
 
 ```lua
@@ -387,6 +393,12 @@ Este es el **único applier**: el de `client/props.lua` (Backend) se elimina. El
 ---
 
 ## Concesionarios
+
+> ⚠️ **IMPORTANTE — `Config.TrustedResources` está VACÍO por defecto.** Si un concesionario externo usa `exports.mdp_garages:SpawnOwnedVehicle` o `exports.mdp_garages:RegisterExternalVehicle`, hay que añadir el nombre exacto de su recurso en `shared/config.lua`:
+> ```lua
+> Config.TrustedResources = { 'qbx_vehicleshop', 'qb-vehicleshop', 'esx_vehicleshop' }
+> ```
+> Si no se añade, ambos exports devuelven `untrusted_resource` y **solo funciona la adopción en el primer guardado** (30 min, `Config.AllowFirstStoreAdoption`).
 
 mdp_garages solo deja guardar o aparcar vehículos **marcados por el servidor** (`Security.MarkServerEntity`). Un coche que el concesionario crea por su cuenta no se puede guardar, salvo por las vías 2 y 3. **Orden de preferencia: `SpawnOwnedVehicle` > `RegisterExternalVehicle` > adopción en el primer guardado.**
 
