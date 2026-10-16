@@ -12,12 +12,15 @@ Bridge.RegisterAdapter('billing', RES, {
         local sender = (src and src > 0 and Bridge.GetIdentifier(src)) or 'server'
         local id = exports[RES]:BillPlayer(target, sender, society and ('society_' .. society) or 'society_police', reason, amount)
         if not id then return false end
-        BillingCommon.Link(RES, id, meta)
+        -- Invoice exists from here on: never report failure (that would reopen the fine as 'internal').
+        -- If the link fails, Link logs it and IssueFine sees HasInvoice == false -> channel 'needs_review'.
+        local linked = Bridge.BillingCommon.SafeLink(RES, id, meta)
+        if not linked then print(('^1[mdp_garages][billing] %s: factura %s creada sin enlace (fine=%s) -> needs_review^0'):format(RES, tostring(id), tostring(meta and meta.fineId))) end
         return true
     end,
 })
 
 AddEventHandler('esx_billing:paidBill', function(src, billId)
     if GetInvokingResource() ~= RES then return end
-    BillingCommon.OnPaid(RES, billId, src)
+    Bridge.BillingCommon.OnPaid(RES, billId, src)
 end)

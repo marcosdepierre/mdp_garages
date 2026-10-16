@@ -40,12 +40,20 @@ local function try(fn, ...) local ok, res = pcall(fn, ...) if not ok then print(
 **Multas: canales y revisión (decisiones del Senior):**
 - `impl.SupportsFines`: vale `true` en esx_billing y qb-phone, y `false` en **okokBilling**. okok **no se usa para multas** porque no tiene paid hook ni devuelve un id de factura. Si okok está detectado, `IssueFine` envía la multa por el canal `internal` (`/mdp_payfine` o la UI) y al arrancar se muestra un aviso en consola. okok sigue siendo válido para tasas con `Config.ChargeMode = 'invoice'`.
 - `mdp_fines.channel` (`Constants.FineChannel`) puede ser `internal`, `invoice`, `external` o `needs_review`. `mdp_fines.paid` (`Constants.FineStatus`) puede ser `UNPAID=0`, `PAID=1`, `CLAIMING=2` o `VOIDED=3`. La anulación usa `paid = VOIDED`, sin columna nueva, y está aislada en `voidFine()` dentro de `server/fine_review.lua`.
-- `BillingCommon.Link(...)` devuelve un boolean y registra el fallo en el log. Si `SendBill` crea la factura pero el enlace no se guarda (`HasInvoice` es false), `IssueFine` pone `channel = 'needs_review'` y lo registra en el log. Con ese estado, `/mdp_payfine` queda bloqueado para evitar el doble cobro.
-- `BillingCommon.OnPaid` es idempotente: resuelve el `fineId` solo a través de `mdp_fine_invoices`, usa un guard in-flight por `fineId` y llama a `MarkFinePaid` como máximo una vez. Nunca mueve dinero.
+- `Bridge.BillingCommon.Link(...)` devuelve un boolean y registra el fallo en el log. Si `SendBill` crea la factura pero el enlace no se guarda (`HasInvoice` es false), `IssueFine` pone `channel = 'needs_review'` y lo registra en el log. Con ese estado, `/mdp_payfine` queda bloqueado para evitar el doble cobro.
+- `Bridge.BillingCommon.OnPaid` es idempotente: resuelve el `fineId` solo a través de `mdp_fine_invoices`, usa un guard in-flight por `fineId` y llama a `MarkFinePaid` como máximo una vez. Nunca mueve dinero.
 - Comando de administración `/mdp_finereview <id> paid|void` (`server/fine_review.lua`). Lo puede usar la consola o cualquiera con el ACE `mdp_garages.admin` (`add_ace group.admin mdp_garages.admin allow`). Solo actúa sobre filas con `channel='needs_review'` y `paid=UNPAID`:
   - `paid` → `Bridge.Billing.MarkFinePaid(id, src)` y después `channel = 'invoice'` (el pago se hizo por la factura externa).
   - `void` → `UPDATE mdp_fines SET paid = VOIDED WHERE id = ? AND paid = UNPAID AND channel = 'needs_review'`. Solo cuenta como éxito si `affectedRows == 1`.
   - Cada acción se registra en el log de consola y se notifica con `Bridge.Notify`.
+
+**Correcciones tras QA (`docs/qa-review-adapters-phase0.md`):**
+- Los helpers ya no son globales: ahora son `Bridge.FuelCommon`, `Bridge.KeysCommon` y `Bridge.BillingCommon`.
+- esx_billing y qb-phone: una vez creada la factura, `SendBill` devuelve siempre `true`. Si el enlace falla (`Bridge.BillingCommon.SafeLink` devuelve false), se registra en el log e `IssueFine` pasa la multa a `needs_review` (nunca a `internal`).
+- `OnPaid`: si `MarkFinePaid` falla, se registra siempre en el log y la multa (`UNPAID` + `invoice`) pasa a `needs_review`.
+- okokBilling: ⚠️ el uso de `CreateCustomInvoice` desde el servidor **no está verificado** (el handler probablemente depende de `source`). Va **el último** en la prioridad automática. Nunca se usa para multas. Para tasas solo se dispara si `Config.OkokTrustServerEvent = true`; si no, `SendBill` devuelve `false` y se cobra en modo instant.
+- Keys: las matrículas se normalizan con `Utils.NormalizePlate` / `Utils.IsValidPlate`. En el cliente, qbx `HasKeys` acepta una entidad o una matrícula (busca la entidad en el pool `CVehicle`).
+- ox_lib: `info` se traduce a `inform` (`TYPES` en `bridge/notify/ox_lib.lua`; ox_lib solo acepta `inform|success|error|warning`).
 
 Implementado en `bridge/billing/esx_billing.lua`, `qb-phone.lua`, `okokBilling.lua` y `_common.lua`. Ejemplo (esx_billing):
 ```lua
@@ -55,12 +63,12 @@ Bridge.RegisterAdapter('billing', 'esx_billing', {
         if not Bridge.ValidAmount(amount) then return false end
         local id = exports.esx_billing:BillPlayer(target, Bridge.GetIdentifier(src) or 'server', 'society_' .. (society or 'police'), reason, amount)
         if not id then return false end
-        BillingCommon.Link('esx_billing', id, meta); return true
+        Bridge.BillingCommon.Link('esx_billing', id, meta); return true
     end,
 })
 AddEventHandler('esx_billing:paidBill', function(src, billId)
     if GetInvokingResource() ~= 'esx_billing' then return end
-    BillingCommon.OnPaid('esx_billing', billId, src) -- -> Bridge.Billing.MarkFinePaid(fineId, src)
+    Bridge.BillingCommon.OnPaid('esx_billing', billId, src) -- -> Bridge.Billing.MarkFinePaid(fineId, src)
 end)
 ```
 Uso desde el core: `if Config.ChargeMode == 'invoice' and Bridge.Billing.Get() then Bridge.Billing.IssueFine(...) else Bridge.RemoveMoney(src, 'bank', fee, reason) end`.
@@ -290,7 +298,7 @@ Orden de auto-detección (`PRIORITY` en cada `init.lua`):
 2. Notify: ox_lib (obligatorio) → framework.
 3. Fuel: `ox_fuel` → `cdn-fuel` → `LegacyFuel` → nativo.
 4. Keys: `qbx_vehiclekeys` → `qb-vehiclekeys` → interno.
-5. Billing: `okokBilling` → `esx_billing` → `qbx_core` → `qb-core`. Después, cualquier adaptador registrado que esté arrancado (p. ej. `qb-phone`) → instant.
+5. Billing (propuesta tras QA): `esx_billing` → `qb-phone` → `okokBilling` (el último). Después, cualquier adaptador registrado que esté arrancado (p. ej. `qb-phone`) → instant.
 6. Phone: `lb-phone` → `npwd` → `qb-phone` → none.
 
 ## Fuentes

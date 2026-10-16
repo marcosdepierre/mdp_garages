@@ -4,14 +4,14 @@ local RES = 'ox_fuel'
 
 Bridge.RegisterAdapter('fuel', RES, {
     GetFuel = function(veh)
-        if not FuelCommon.Valid(veh) then return 0.0 end
+        if not Bridge.FuelCommon.Valid(veh) then return 0.0 end
         local v = Entity(veh).state.fuel
         if type(v) == 'number' then return v end
-        return FuelCommon.Get(veh)
+        return Bridge.FuelCommon.Get(veh)
     end,
     SetFuel = function(veh, value)
-        if not FuelCommon.Valid(veh) then return false end
-        value = FuelCommon.Clamp(value)
+        if not Bridge.FuelCommon.Valid(veh) then return false end
+        value = Bridge.FuelCommon.Clamp(value)
         -- client: replicate=true requires network ownership; server: always authoritative
         local ok = pcall(function() Entity(veh).state:set('fuel', value, true) end)
         if not IsDuplicityVersion() then SetVehicleFuelLevel(veh, value) end

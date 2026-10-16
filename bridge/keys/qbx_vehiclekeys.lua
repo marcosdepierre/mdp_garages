@@ -6,7 +6,7 @@ local RES = 'qbx_vehiclekeys'
 if IsDuplicityVersion() then
     local function call(fn, src, vehicle, ...)
         if type(src) ~= 'number' or src <= 0 then return false end
-        local veh = KeysCommon.ToEntity(vehicle); if not veh then return false end
+        local veh = Bridge.KeysCommon.ToEntity(vehicle); if not veh then return false end
         local ok, res = pcall(function(...) return exports[RES][fn](exports[RES], src, veh, ...) end, ...)
         return ok and res
     end
@@ -18,8 +18,8 @@ if IsDuplicityVersion() then
 else
     Bridge.RegisterAdapter('keys', RES, {
         HasKeys = function(vehicle)
-            local veh = type(vehicle) == 'number' and vehicle or nil
-            if not veh or not DoesEntityExist(veh) then return false end
+            local veh = Bridge.KeysCommon.ToEntity(vehicle) -- entity or (normalized) plate
+            if not veh then return false end
             local ok, res = pcall(function() return exports[RES]:HasKeys(veh) end)
             return ok and res == true
         end,
