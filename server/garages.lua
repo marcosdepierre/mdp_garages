@@ -281,12 +281,15 @@ end
 --- Core checks + mark/track/managed. Caller holds the plate lock. Returns true | false, code.
 --- opts = { src?, requireOwnerSrc?, requireDriver?, windowSec, evName, invoker? }
 local function adoptUnmarked(ent, plate, opts)
-    -- window start: framework-imported rows -> later of first_seen_at / fw_date_at (first_seen_at NULL or future -> no);
-    -- mdp rows (AddVehicle) -> created_at. Allowed: -300 s (clock skew, fw date only) .. windowSec after the start.
+    -- framework-imported rows: first_seen_at required; each present date not more than 300 s in the future; elapsed since
+    -- the EARLIEST of first_seen_at / fw_date_at <= windowSec (1800 first store, 60 RegisterExternalVehicle).
+    -- mdp rows (AddVehicle): created_at within windowSec and not in the future.
     local row = MySQL.single.await([[SELECT owner, model, state, managed_at, source,
         CASE WHEN source = 'framework' THEN
-            (first_seen_at IS NOT NULL AND first_seen_at <= NOW()
-             AND TIMESTAMPDIFF(SECOND, GREATEST(first_seen_at, COALESCE(fw_date_at, first_seen_at)), NOW()) BETWEEN -300 AND ?)
+            (first_seen_at IS NOT NULL
+             AND TIMESTAMPDIFF(SECOND, first_seen_at, NOW()) >= -300
+             AND (fw_date_at IS NULL OR TIMESTAMPDIFF(SECOND, fw_date_at, NOW()) >= -300)
+             AND TIMESTAMPDIFF(SECOND, LEAST(first_seen_at, COALESCE(fw_date_at, first_seen_at)), NOW()) <= ?)
         ELSE (created_at IS NOT NULL AND created_at >= NOW() - INTERVAL ? SECOND AND created_at <= NOW()) END AS in_window
         FROM mdp_vehicles WHERE plate = ?]], { opts.windowSec, opts.windowSec, plate })
     local src = opts.src
