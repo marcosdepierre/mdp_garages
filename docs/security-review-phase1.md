@@ -486,7 +486,7 @@ Antes de cerrar la fase 1 hay que arreglar **TR-1** (UPDATE condicionados al due
 **R7-3 (Bajo) — `AddVehicle` con la matrícula bloqueada** devuelve `transfer_failed` (indistinguible de un fallo real). *Arreglo:* propagar `'locked'` → `busy` para que el concesionario reintente.
 
 ## Veredicto
-No quedan Críticos. Hay **un Alto: R7-1** (control del dueño del framework en takeOut/SpawnOwnedVehicle, el mismo que reporta QC en `3d6077a`). **La fase 1 NO está cerrada en el plano de seguridad hasta aplicar R7-1.** Es un arreglo pequeño que reutiliza el patrón de `lockedOwnVehicle`. Con R7-1 aplicado y verificado, la fase 1 queda cerrada; R7-2, R7-3, AD-1 y TR-3 pueden ir a la fase 2.
+No quedan Críticos. Hay **un Alto: R7-1** (control del dueño del framework en takeOut/SpawnOwnedVehicle, el mismo que reporta QC en `3d6077a`). **La fase 1 no estaba cerrada hasta aplicar R7-1 (cerrado después en `e10f763`; ver el veredicto final).** Es un arreglo pequeño que reutiliza el patrón de `lockedOwnVehicle`. Con R7-1 aplicado y verificado, la fase 1 queda cerrada; R7-2, R7-3, AD-1 y TR-3 pueden ir a la fase 2.
 
 ## Añadido a la re-revisión 7: `e10f763` y marca HMAC
 
