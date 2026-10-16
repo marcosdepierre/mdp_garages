@@ -487,3 +487,20 @@ Antes de cerrar la fase 1 hay que arreglar **TR-1** (UPDATE condicionados al due
 
 ## Veredicto
 No quedan Críticos. Hay **un Alto: R7-1** (control del dueño del framework en takeOut/SpawnOwnedVehicle, el mismo que reporta QC en `3d6077a`). **La fase 1 NO está cerrada en el plano de seguridad hasta aplicar R7-1.** Es un arreglo pequeño que reutiliza el patrón de `lockedOwnVehicle`. Con R7-1 aplicado y verificado, la fase 1 queda cerrada; R7-2, R7-3, AD-1 y TR-3 pueden ir a la fase 2.
+
+## Añadido a la re-revisión 7: `e10f763` y marca HMAC
+
+### `e10f763` — control común del dueño del framework, `duplicate_plate`, adopción del clon marcado al reiniciar
+- **`checkFrameworkOwner`** se llama dentro del lock en **takeOut, store/park (`lockedOwnVehicle`) y SpawnOwnedVehicle**. Si no coincide → `ApplyTransfer(…, locked=true)`, reutilizando el lock sin deadlock, y `not_owner`. Con `'ambiguous'` → `duplicate_plate`, falla cerrado y aviso al admin. **R7-1 cerrado. R7-2 cerrado.**
+- **Adopción al reiniciar:** si hay varias entidades con matrícula y modelo coincidentes, solo se adopta la **única** que pasa `IsServerEntity`. Los clones sin marca se borran si están vacíos y se ignoran si están ocupados. Con 0 o 2+ marcadas no se adopta ninguna y la fila queda OUT. Correcto: nunca se adopta una entidad del cliente. Nota: con la nueva marca HMAC, en el primer reinicio tras actualizar no hay marcas válidas, así que se cae en «ninguna adoptada» (el mismo efecto que R3-2, ya en las notas de versión).
+- **P1-OWN-M1** (sin entidad marcada → la fila queda OUT y el dueño no puede recuperar su coche) **queda para la fase 2** con un diseño de «recover»: borrar los clones vacíos sin marca y crear un coche nuevo y marcado desde el servidor (con lock, `AND owner = ?` y pasando por el recorrido del pool). **Nunca adoptar una entidad del cliente.**
+
+### Marca de entidad: joaat → HMAC-SHA256 (security.lua)
+- **Problema:** `joaat(secret .. ':' .. plate)` da 32 bits y, tras el prefijo secreto, el estado interno de one-at-a-time también es de 32 bits. Con un solo par (matrícula, marca) filtrado se puede continuar el hash y falsificar la marca de cualquier matrícula, y además es atacable por fuerza bruta.
+- **Arreglo:** SHA-256 y HMAC-SHA256 en Lua 5.4 puro (enteros nativos, `>>`, `<<`, `~`, `&`, `string.pack`). La marca es `hex(HMAC(secret, 'mdp_srv:' .. plate))[1..32]` (128 bits). La comparación es en tiempo constante (`ctEqual`). Las firmas de `MarkServerEntity`, `IsServerEntity` y `UnmarkServerEntity` no cambian. Las primitivas se exponen en `Security.Crypto` (`sha256`, `hmacSha256`, `toHex`, `ctEqual`).
+- **Tests:** SHA-256 de `''` y `'abc'`, y los vectores de RFC 4231 1, 2, 3, 4, 6 y 7 (incluida una clave mayor que el bloque). La marca tiene 32 hex, está ligada a la matrícula, se valida tras un «reinicio» (sin memoria) y se rechaza un valor joaat antiguo.
+- **Fugas:** la marca se escribe con `state:set(SRV_KEY, tag, false)` (no replicada; el test lo comprueba). Ni `security.lua` ni el resto (`server/`, `client/`, `shared/`) imprime o registra la marca ni el secreto. El backend solo usa `Entity(ent).state.mdp_srv ~= nil` (existencia, `garages.lua:331`). **Sin fugas.**
+- **Nota de versión** añadida en `docs/release-notes.md`: las marcas antiguas dejan de ser válidas en el siguiente reinicio (mismo efecto que R3-2).
+
+## Veredicto final de la re-revisión 7
+Con `e10f763` (R7-1 y R7-2 cerrados) y la marca HMAC, **la fase 1 queda CERRADA en el plano de seguridad: no quedan hallazgos Críticos, Altos ni Medios abiertos.** Pasan a la fase 2: P1-OWN-M1 (recover), R7-3, AD-1 (valor por defecto) y TR-3 (transacción). Pendiente para el backend: emitir `Security.Log('AUDIT', 'transfer', …)` (TR-5) y en `adopt`/`regularize`/`external`.

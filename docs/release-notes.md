@@ -14,6 +14,9 @@ set mdp_garages_entity_secret "<cadena aleatoria larga, ≥ 32 caracteres>"
 - No lo cambies con el servidor en marcha: los vehículos marcados con el secreto anterior dejan de reconocerse en el siguiente reinicio (mismo efecto que la migración de abajo).
 - No lo publiques ni lo subas a repositorios.
 
+### Marca de entidades HMAC-SHA256 (re-revisión 7)
+La marca oculta de los vehículos del servidor (`mdp_srv`) pasa de `joaat(secreto:matrícula)`, de 32 bits y falsificable con un solo par filtrado, a `HMAC-SHA256(secreto, 'mdp_srv:' .. matrícula)` (128 bits, en Lua puro). **Las marcas antiguas dejan de ser válidas en el siguiente reinicio del recurso**, con el mismo efecto que R3-2 (ver abajo): los vehículos que estén fuera en ese momento no se adoptan y se tratan según esa sección. Reinicia con los vehículos guardados si puedes. No hace falta cambiar el secreto ni `server.cfg`.
+
 ### Primer reinicio tras actualizar (R3-2)
 Los vehículos que se spawnearon con una versión anterior (antes de `a8fda43`) no llevan la marca del servidor. En el primer reinicio del recurso tras actualizar:
 
