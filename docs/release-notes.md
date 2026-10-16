@@ -29,5 +29,12 @@ Recomendación: actualiza en un reinicio programado con pocos jugadores conectad
 - `sv_filterRequestControl 2` (o `1`).
 - `sv_stateBagStrictMode true` solo si ningún otro recurso escribe statebags desde el cliente.
 
+### Concesionarios: `Config.TrustedResources` (QC R2-L4)
+> ⚠️ **IMPORTANTE:** `Config.TrustedResources` está **vacío por defecto**. Los exports `SpawnOwnedVehicle` y `RegisterExternalVehicle` solo aceptan llamadas de los recursos de esa lista; si el recurso no está, devuelven `untrusted_resource`.
+
+Añade el nombre exacto del recurso de tu concesionario en `shared/config.lua`, por ejemplo: `Config.TrustedResources = { 'qbx_vehicleshop', 'qb-vehicleshop', 'esx_vehicleshop' }`.
+
+Si no lo añades, solo funciona la adopción en el primer guardado (`Config.AllowFirstStoreAdoption = true`). El dueño tiene 30 min para guardar el vehículo mientras lo conduce, y el concesionario tiene que spawnearlo antes del siguiente sync del jugador. Los detalles están en `docs/integrations.md`, en la sección "Concesionarios".
+
 ### `ox:callbackTimeout` (opcional)
 `setr ox:callbackTimeout <ms>` es un convar **global** de ox_lib que afecta a todos los recursos, así que mdp_garages **no lo exige**. Es **opcional**. El valor por defecto es 300 s (300000 ms); si lo cambias, es para **bajarlo** (por ejemplo, `setr ox:callbackTimeout 20000`), para que un callback colgado no deje la UI esperando minutos. Ten en cuenta que afecta también a los demás recursos que usan ox_lib. No hace falta por seguridad, porque el servidor ya protege contra el doble envío (lock por matrícula, UPDATE condicional por estado y rate limit por jugador), y el cliente ignora las respuestas que llegan tarde (L1 de Frontend).
