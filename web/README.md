@@ -85,3 +85,11 @@ files {
 - Engine/body health clamped to 0..1000 before % (engine may be negative).
 - Dev: `?view=detail&plate=…&garage=impound:lspd`, `?fetch=1`; `KEY 42` fails once with `spawn_failed`.
 - e2e: `npm run test:e2e` (n16, r5-flows, phase1).
+
+## Server requirement: ox_lib callback timeout
+Store/park use `lib.callback` with a 15 s UI timeout and a 20 s safety backstop that frees the lock (`client/zones.lua`).
+ox_lib's own callback timeout is global (default 300 s), so set it in `server.cfg` so a request can't still be pending
+when the player is allowed to retry:
+```
+setr ox:callbackTimeout 20000
+```

@@ -20,6 +20,15 @@ local function readVehicle(veh)
     return props, tonumber(fuel), MDPClientMileage(plate)
 end
 
+--- P1F-R3-M1: normalize a server callback result like serverCall in client/main.lua:
+--- {ok, error?, data?} tables and Security rejections returned as (false, err) tuples; codes via Utils.ErrorCode.
+local function normalize(res, err)
+    if res == false then return { ok = false, error = Utils.ErrorCode(err) } end
+    if type(res) ~= 'table' then return { ok = false, error = 'server_error' } end
+    if res.ok == false then res.error = Utils.ErrorCode(res.error) end
+    return res
+end
+
 --- Security F1 / P1F-M2: busy stays set while the request is alive and is ALWAYS released
 --- (response, callback timeout, safety timer, or a Lua error). prepare() -> { event, payload, map(res) -> toast }.
 local function guarded(toastId, prepare)
@@ -46,8 +55,8 @@ local function guarded(toastId, prepare)
     SetTimeout(CALLBACK_TIMEOUT_MS, function()
         if not settled and attempt == token then settled = true; toast({ id = toastId, kind = 'error', error = 'timeout' }) end
     end)
-    local sent, err = pcall(lib.callback, spec.event, false, function(res)
-        local okm, t = pcall(spec.map, type(res) == 'table' and res or { ok = false, error = 'server_error' })
+    local sent, err = pcall(lib.callback, spec.event, false, function(res, rerr)
+        local okm, t = pcall(spec.map, normalize(res, rerr))
         if not okm or type(t) ~= 'table' then t = { id = toastId, kind = 'error', error = 'server_error' } end
         -- P1F-R2-M1/L2: only this attempt's toast slot; a late result (success or error, after the 15 s timeout
         -- toast) replaces it, but never once a newer request has started (it would overwrite that one's toast).
