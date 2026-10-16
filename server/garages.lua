@@ -416,3 +416,63 @@ RegisterCommand('mdp_regularize', function(src, args)
         reply(('%s regularized -> %s'):format(plate, gid))
     end)
 end, true) -- restricted: add_ace group.admin command.mdp_regularize allow
+
+---------------------------------------------------------------------------
+-- Server export for dealerships: exports.mdp_garages:SpawnOwnedVehicle(plate, coords, src) -> netId | nil, err
+-- Same flow as takeOut: lock, re-read row, owner == src identifier, state GARAGED or OUT without tracked entity,
+-- MDP.Props.SpawnVehicle (server mark, TrackSpawn, props via RequestApply, fuel), state OUT, keys, FrameworkSync.
+-- Errors: invalid_plate, invalid_coords, invalid_source, rate_limited, not_ready, not_owned_vehicle, not_owner,
+-- invalid_state, already_out, spawn_failed, locked.
+---------------------------------------------------------------------------
+local function parseCoords(c)
+    if c == nil then return nil end
+    local ok, x, y, z, w = pcall(function() return c.x, c.y, c.z, c.w end)
+    if not ok then return nil end
+    x, y, z, w = tonumber(x), tonumber(y), tonumber(z), tonumber(w) or 0.0
+    if not x or not y or not z or w ~= w or w == math.huge or w == -math.huge then return nil end
+    local v = vec3(x + 0.0, y + 0.0, z + 0.0)
+    if not MDP.Props.ValidCoords(v) then return nil end -- L4: finite, inside the map
+    return v, w + 0.0
+end
+
+local function SpawnOwnedVehicle(plate, coords, src)
+    if not MDP.Ready then return nil, 'not_ready' end
+    plate = type(plate) == 'string' and Utils.NormalizePlate(plate) or nil
+    if not plate or not Utils.IsValidPlate(plate) then return nil, 'invalid_plate' end
+    local pos, heading = parseCoords(coords)
+    if not pos then return nil, 'invalid_coords' end
+    src = math.tointeger(tonumber(src))
+    if not src or src <= 0 or not GetPlayerName(src) then return nil, 'invalid_source' end -- online player only
+    if Security.RateLimit and not Security.RateLimit(src, 'export:SpawnOwnedVehicle', 3, 10000) then return nil, 'rate_limited' end
+    local ident = Bridge.GetIdentifier(src)
+    if not ident then return nil, 'invalid_source' end
+    print(('[mdp_garages] SpawnOwnedVehicle %s for src %d by %s'):format(plate, src, tostring(GetInvokingResource())))
+    local res = table.pack(Security.WithLock(plate, src, function()
+        local row = MySQL.single.await([[SELECT plate, owner, model, vtype, props, state, garage_id, fuel, engine, body, mileage
+            FROM mdp_vehicles WHERE plate = ?]], { plate })
+        if not row or tonumber(row.state) == VS.REMOVED then return nil, 'not_owned_vehicle' end
+        if row.owner ~= ident then return nil, 'not_owner' end
+        local state = tonumber(row.state)
+        if state ~= VS.GARAGED and state ~= VS.OUT then return nil, 'invalid_state' end
+        if Security.GetSpawnedEntity(plate) then return nil, 'already_out' end
+        if state == VS.GARAGED then
+            local n = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, parked_at = NULL WHERE plate = ? AND state = ?',
+                { VS.OUT, plate, VS.GARAGED })
+            if n ~= 1 then return nil, 'invalid_state' end
+        end
+        local veh, netId = MDP.Props.SpawnVehicle(row, pos.x, pos.y, pos.z, heading, src) -- pcall + entity cleanup inside (H1/N3)
+        if not veh then
+            if state == VS.GARAGED then -- roll back to the exact previous state
+                MySQL.update.await('UPDATE mdp_vehicles SET state = ?, garage_id = ? WHERE plate = ? AND state = ?',
+                    { VS.GARAGED, row.garage_id, plate, VS.OUT })
+            end
+            return nil, 'spawn_failed'
+        end
+        MDP.Props.GiveKeys(src, veh, plate) -- after the entity exists
+        MDP.Props.Hook(Bridge.FrameworkSync, 'OnSpawn', plate)
+        return netId
+    end))
+    if res[1] == false then return nil, res[2] or 'locked' end -- lock not acquired
+    return res[1], res[2]
+end
+exports('SpawnOwnedVehicle', SpawnOwnedVehicle)
