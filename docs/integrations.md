@@ -307,3 +307,49 @@ Orden de auto-detección (`PRIORITY` en cada `init.lua`):
 ✅ ox_fuel README · LegacyFuel · cdn-fuel (fxmanifest, client/utils.lua) · qbx_vehiclekeys (server/keys.lua, client/functions.lua) · ox_lib notify · esx_billing: https://github.com/esx-framework/ESX-Legacy-Addons · qb-vehiclekeys client.lua/server.lua · qb-phone client.lua/server.lua · npwd cl_exports.ts / sv_exports.ts · lb-phone https://docs.lbscripts.com/phone/exports/server-exports/ · okokBilling snippets https://docs.okokscripts.io/scripts/okokbilling/snippets.md
 
 ⚠️ Pendiente: okokBilling desde el servidor y su evento de pago (recurso escrow); npwd `emitMessage`; qb-phone `PhoneNotification` (no existe en el qb-phone actual).
+
+---
+
+## Fase 1 — API nueva (Integrations)
+
+### Combustible
+| Función | Lado | Retorno |
+|---|---|---|
+| `Bridge.Fuel.Call('GetFuel', fallback, veh)` / `Bridge.Fuel.Call('SetFuel', fallback, veh, value)` | cliente (ox_fuel también servidor) | number / boolean; si no hay adaptador, se usan los nativos (`Bridge.FuelCommon`) |
+| `Bridge.FuelCommon.ServerCapable()` | servidor | `true` solo con **ox_fuel** (statebag); propuesta de alias `Bridge.Fuel.ServerCapable` en `fuel/init.lua` |
+| `Bridge.FuelCommon.Clamp(v)` | ambos | número limitado a 0–100 (con NaN, 100) |
+
+**Requisito en el cliente:** con LegacyFuel, cdn-fuel o nativo, `SetFuel` tiene que ejecutarse **en el cliente dueño de la entidad** después del spawn (`Bridge.Props.Apply` lo hace con `props.fuelLevel`). Al guardar, el servidor lee el valor que manda el cliente, limitado a 0–100 (`Bridge.Props.Sanitize`). Con ox_fuel, el servidor puede fijar `Entity(veh).state.fuel` él mismo.
+
+### Llaves (`bridge/keys/zz_api.lua`)
+| Función | Lado | Retorno |
+|---|---|---|
+| `Bridge.Keys.GiveKeys(src, vehicle entity|plate)` | servidor | boolean (`true` también cuando no hay recurso externo: `mdp_vehicle_keys` hace de almacén de respaldo) |
+| `Bridge.Keys.RemoveKeys(src, vehicle entity|plate)` | servidor | boolean |
+| `Bridge.Keys.HasKeys(src, vehicle)` | servidor | boolean, o `nil` si no hay recurso externo (en ese caso se consulta `mdp_vehicle_keys`) |
+| `Bridge.Keys.HasKeys(vehicle)` | cliente | boolean o `nil` |
+
+Adaptadores: `qbx_vehiclekeys` (entidad), `qb-vehiclekeys` (matrícula), y además:
+| Recurso | Exports usados (servidor) | Estado |
+|---|---|---|
+| wasabi_carlock | `GiveKey(src, plate)` (devuelve la matrícula), `RemoveKey(src, plate)` → bool, `HasKey(src, plate)` → bool | ✅ docs https://docs.wasabiscripts.com/advanced-series/wasabi-carlock/exports (recurso escrow) |
+| MrNewbVehicleKeys | `GiveKeysByPlate(src, plate, autoKeyring)`, `RemoveKeysByPlate(src, plate, deepSearch)` | ✅ docs https://mrnewbs-scrips.gitbook.io/guide/mrnewbvehiclekeys-beta/vehicle-keys-exports/server-exports · ⚠️ no se ha confirmado un `HasKeys` en servidor, así que no se usa |
+| qs-vehiclekeys | `GiveServerKeys(src, plate, model, false)`, `RemoveServerKeys(src, plate, model)`; `model` se toma de `mdp_vehicles.model` | ✅ docs https://www.quasar-store.com/docs/vehiclekeys/commands-and-exports (escrow) |
+| jaksam vehicles_keys | solo hay un evento de cliente público (`vehicles_keys:selfGiveVehicleKeys`) | ⚠️ sin API de servidor verificada; no implementado |
+
+### Propiedades del vehículo (`bridge/vehicle/props.lua`)
+| Función | Lado | Retorno |
+|---|---|---|
+| `Bridge.Props.Get(veh)` | cliente | tabla (`lib.getVehicleProperties` + `fuelLevel` del bridge de combustible) o `nil` |
+| `Bridge.Props.Apply(veh, props|json)` | cliente | boolean (`lib.setVehicleProperties` + `SetFuel`) |
+| `Bridge.Props.Sanitize(raw, expectedPlate?)` | ambos (usar en servidor) | `tabla, json` o `nil, err` (`too_large` si supera 64 KB, `invalid_json`, `invalid_props`, `encode_failed`). Solo conserva datos planos, con profundidad ≤ 6 y strings ≤ 256; limita fuel/engine/body/tank/dirt; fuerza la matrícula del servidor |
+| Applier del statebag `mdp_props` | cliente | el dueño de red aplica las props una vez por entidad (lo fija `server/garages.lua`) |
+
+### Espejo en las tablas del framework (`bridge/vehicle/framework_sync.lua`)
+Solo está activo si `Config.SyncFrameworkTables = true` y `Config.MirrorFrameworkTables ~= false`. Solo hace `UPDATE` sobre filas que ya existen, buscando por matrícula; nunca inserta ni borra. Las consultas son parametrizadas y van con pcall y log.
+| Función | Lado | Retorno |
+|---|---|---|
+| `Bridge.FrameworkSync.Mirror(plate, { state?, garage_id?, props?, fuel?, engine?, body? })` | servidor | `true` si se actualizó una fila |
+| `Bridge.FrameworkSync.OnStore(plate, garageId, props, fuel, engine, body)` / `OnSpawn(plate)` / `OnImpound(plate)` | servidor | ídem |
+
+Mapeo de estados: qb/qbx `player_vehicles.state`: OUT/PARKED_WORLD → 0, GARAGED → 1, IMPOUNDED → 2 (RETIRED/REMOVED no se tocan); también actualiza `mods`, `fuel` (entero), `engine`, `body` y `garage` cuando el vehículo se guarda. ESX `owned_vehicles`: `vehicle` = JSON de props, `stored` = 1 solo en GARAGED, y `parking` = garage_id al guardar.

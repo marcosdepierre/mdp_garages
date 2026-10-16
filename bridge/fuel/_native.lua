@@ -19,3 +19,11 @@ function Bridge.FuelCommon.Set(veh, v)
     if not IsDuplicityVersion() then SetVehicleFuelLevel(veh, v) end
     return true
 end
+
+--- Server-side fuel capability: true only when the active adapter can set fuel from the server
+--- (ox_fuel statebag). LegacyFuel/cdn-fuel/native must be set on the CLIENT that owns the entity.
+function Bridge.FuelCommon.ServerCapable()
+    if not (Bridge.Fuel and Bridge.Fuel.Get) then return false end
+    local ok, _, res = pcall(Bridge.Fuel.Get)
+    return ok and res == 'ox_fuel'
+end
