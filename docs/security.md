@@ -101,10 +101,29 @@ Siempre en servidor vía `Bridge.GetJob(src)` → `{ name, grade, onDuty }`. Usa
 3. Mantiene el tracking de vehículos (siguen en el mundo) pero pone su `src = nil`. Con `Config.Security.despawnOnDropMs` (nil por defecto = no hacer nada), tras ese tiempo llama a `Security.OnDroppedVehicleTimeout(plate, netId, identifier)` si el vehículo sigue existiendo y nadie lo reclamó; `server/persistence.lua` decide guardarlo o borrarlo. `Security.ClaimSpawn(plate, src)` reasigna un vehículo al reconectar.
 4. Llama al hook `Security.OnPlayerDropped(src, identifier, plates, reason)`.
 
-## 10. Checklist de revisión (PR)
+## 10. Props de vehículo (`Security.SanitizeProps`)
+
+`Security.SanitizeProps(props, dbRow, entity?) -> clean|nil, err, encodedJson`
+
+- Se usa al **guardar** (storeVehicle) las props de `lib.getVehicleProperties` enviadas por el cliente. Guardar `encodedJson` (el JSON ya saneado), nunca el original.
+- `dbRow = { plate, model, mileage? }` leído de BD dentro del lock.
+- **Modelo**: `props.model` debe coincidir (hash, 32 bits con/sin signo) con `dbRow.model` y, si se pasa `entity`, con `GetEntityModel(entity)`. Si no coincide → rechazo (`model_mismatch` / `entity_model_mismatch`).
+- **Matrícula**: se ignora la del cliente y se sustituye por `dbRow.plate` normalizada.
+- **Whitelist** (`Security.PropRules`): campos de ox_lib (salud, fuel, colores, mods, extras, neones, ventanas, puertas, ruedas…). Los campos desconocidos **se descartan**; los valores enteros fuera de rango **se descartan**; los decimales se recortan al rango.
+- Rangos: `fuelLevel`/`oilLevel` 0-100, `dirtLevel` 0-15, `engineHealth` -4000..1000, `bodyHealth` 0..1000, `tankHealth` -1000..1000, colores 0-255 o `{r,g,b}` 0-255, `mod*` -1..255, `extras` índices 0-20 con 0/1, `neonEnabled` 1-4 booleanos.
+- **Kilometraje**: si viene `mileage` menor que el de BD, **se conserva el de BD** (no se rechaza, para no bloquear el guardado por desincronización).
+- Límites: profundidad máx. 3, máx. 64 elementos por tabla anidada, JSON final ≤ **16 KB** (`Security.Props.maxBytes`). Superarlos → rechazo (`props_too_deep` / `props_too_large`).
+- `Security.ClampHealth('engine'|'body'|'tank', v)` para cualquier salud que se escriba en BD.
+
+Revisión de fase 1 con hallazgos para backend: `docs/security-review-phase1.md`.
+
+## 11. Checklist de revisión (PR)
 
 - [ ] Todo evento de red usa `RegisterSecureEvent`/`RegisterSecureCallback` con `schema` estricto.
 - [ ] `rateLimit` adecuado definido.
+- [ ] Props del cliente pasadas por `Security.SanitizeProps(props, row, veh)` y guardado el JSON saneado.
+- [ ] Salud escrita en BD con `Security.ClampHealth`.
+- [ ] Spawn en `pcall` con rollback al estado previo exacto.
 - [ ] Acciones sobre entidad: `resolvePlate` + `data._plate` (nunca matrícula del cliente).
 - [ ] Propiedad verificada por matrícula + identificador en servidor (llaves solo donde proceda; `IsOwner(..., false)` para acciones de dueño).
 - [ ] Matrícula normalizada vía `Utils` (8 máx. por defecto, `Config.PlateMaxLength`) y `garage_id` validado con `Utils.IsValidGarageId` + existencia en config.

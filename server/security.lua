@@ -297,6 +297,159 @@ function Security.PlateFromNetId(netId)
 end
 
 ---------------------------------------------------------------------------
+-- Saneado de propiedades de vehículo (props de lib.getVehicleProperties enviadas por el cliente)
+---------------------------------------------------------------------------
+Security.Props = {
+    maxBytes = 16384,   -- tamaño máximo del JSON resultante
+    maxDepth = 3,       -- profundidad máxima de tablas anidadas
+    maxTableItems = 64, -- elementos máximos por tabla anidada
+}
+
+--- Convenciones GTA: motor -4000..1000, carrocería 0..1000, depósito -1000..1000, suciedad 0..15, fuel 0..100.
+local HEALTH = {
+    engine = { -4000.0, 1000.0 }, body = { 0.0, 1000.0 }, tank = { -1000.0, 1000.0 },
+}
+Security.Health = HEALTH
+
+--- Clamp de salud para guardar en BD (usar en UPDATE engine/body).
+function Security.ClampHealth(kind, v)
+    local r = HEALTH[kind]; if not r then return nil end
+    v = tonumber(v)
+    if not v or v ~= v then return r[2] end
+    return V.clamp(v, r[1], r[2])
+end
+
+local function num(min, max, int)
+    return function(v)
+        if type(v) ~= 'number' or v ~= v or v == math.huge or v == -math.huge then return nil end
+        if int then
+            if v % 1 ~= 0 then return nil end
+            v = math.tointeger(v) or v
+        end
+        -- enteros fuera de rango -> descartar; decimales -> clamp
+        if v < min then if int then return nil end return min end
+        if v > max then if int then return nil end return max end
+        return v
+    end
+end
+local function bool(v) if type(v) == 'boolean' then return v end return nil end
+local function rgb(v)
+    if type(v) ~= 'table' then return nil end
+    local r, g, b = num(0, 255, true)(v[1]), num(0, 255, true)(v[2]), num(0, 255, true)(v[3])
+    if not (r and g and b) then return nil end
+    return { r, g, b }
+end
+local function colorOrRgb(v) if type(v) == 'table' then return rgb(v) end return num(0, 255, true)(v) end
+--- Lista/mapa con claves enteras acotadas y valores validados.
+local function intMap(maxKey, valueFn)
+    return function(v)
+        if type(v) ~= 'table' then return nil end
+        local out, n = {}, 0
+        for k, val in pairs(v) do
+            local key = tonumber(k)
+            if not key or key % 1 ~= 0 or key < 0 or key > maxKey then return nil end
+            local cv = valueFn(val)
+            if cv == nil then return nil end
+            n = n + 1
+            if n > Security.Props.maxTableItems then return nil end
+            out[math.tointeger(key)] = cv
+        end
+        return out
+    end
+end
+local function extraVal(v)
+    if type(v) == 'boolean' then return v and 1 or 0 end
+    return num(0, 1, true)(v)
+end
+local function anyBoolOrInt(v) if type(v) == 'boolean' then return v end return num(-1, 255, true)(v) end
+local modIdx = num(-1, 255, true)
+
+-- Whitelist de campos (ox_lib getVehicleProperties). Lo que no esté aquí se descarta.
+local PROP_RULES = {
+    plateIndex = num(0, 5, true),
+    bodyHealth = num(HEALTH.body[1], HEALTH.body[2]),
+    engineHealth = num(HEALTH.engine[1], HEALTH.engine[2]),
+    tankHealth = num(HEALTH.tank[1], HEALTH.tank[2]),
+    fuelLevel = num(0, 100), oilLevel = num(0, 100), dirtLevel = num(0, 15),
+    paintType1 = num(0, 9, true), paintType2 = num(0, 9, true),
+    color1 = colorOrRgb, color2 = colorOrRgb,
+    pearlescentColor = num(0, 255, true), interiorColor = num(0, 255, true), dashboardColor = num(0, 255, true),
+    wheelColor = num(0, 255, true), wheelWidth = num(0, 10), wheelSize = num(0, 10),
+    wheels = num(0, 12, true), windowTint = num(-1, 6, true), xenonColor = num(-1, 255, true),
+    neonEnabled = intMap(4, bool), neonColor = rgb, tyreSmokeColor = rgb,
+    extras = intMap(20, extraVal), -- índices 0..20 (con [99] -> se descarta la tabla entera),
+    windows = intMap(14, anyBoolOrInt), doors = intMap(8, anyBoolOrInt), tyres = intMap(48, anyBoolOrInt),
+    bulletProofTyres = bool, driftTyres = bool,
+    modTurbo = bool, modSmokeEnabled = bool, modXenon = bool, modCustomTiresF = bool, modCustomTiresR = bool,
+    modLivery = modIdx, modRoofLivery = modIdx,
+}
+for _, m in ipairs({ 'modSpoilers', 'modFrontBumper', 'modRearBumper', 'modSideSkirt', 'modExhaust', 'modFrame',
+    'modGrille', 'modHood', 'modFender', 'modRightFender', 'modRoof', 'modEngine', 'modBrakes', 'modTransmission',
+    'modHorns', 'modSuspension', 'modArmor', 'modNitrous', 'modSubwoofer', 'modHydraulics', 'modFrontWheels',
+    'modBackWheels', 'modPlateHolder', 'modVanityPlate', 'modTrimA', 'modOrnaments', 'modDashboard', 'modDial',
+    'modDoorSpeaker', 'modSeats', 'modSteeringWheel', 'modShifterLeavers', 'modAPlate', 'modSpeakers', 'modTrunk',
+    'modHydrolic', 'modEngineBlock', 'modAirFilter', 'modStruts', 'modArchCover', 'modAerials', 'modTrimB',
+    'modTank', 'modWindows', 'modDoorR', 'modLightbar' }) do
+    PROP_RULES[m] = modIdx
+end
+Security.PropRules = PROP_RULES
+
+local function depthOk(t, d)
+    if d > Security.Props.maxDepth then return false end
+    for _, v in pairs(t) do
+        if type(v) == 'table' and not depthOk(v, d + 1) then return false end
+    end
+    return true
+end
+
+--- Sanea props del cliente antes de guardarlas.
+--- * Solo campos de PROP_RULES; campos desconocidos o fuera de rango se DESCARTAN (no rechazan).
+--- * model: debe coincidir con dbRow.model (hash) y, si se pasa entity, con GetEntityModel(entity). Si no -> rechazo.
+--- * plate: se sustituye SIEMPRE por la del servidor (dbRow.plate).
+--- * mileage (si viene): nunca por debajo del valor de BD -> se conserva el de BD (no se rechaza).
+--- * Profundidad > maxDepth o JSON > maxBytes -> rechazo.
+---@param props table
+---@param dbRow {plate: string, model: string|integer, mileage: number|nil}
+---@param entity integer|nil
+---@return table|nil clean, string|nil err
+function Security.SanitizeProps(props, dbRow, entity)
+    if type(props) ~= 'table' then return nil, 'props_not_table' end
+    if type(dbRow) ~= 'table' or not dbRow.plate or dbRow.model == nil then return nil, 'no_db_row' end
+    if not depthOk(props, 1) then return nil, 'props_too_deep' end
+    local dbHash = Utils.ModelHash(dbRow.model)
+    if math.type(dbHash) ~= 'integer' then return nil, 'bad_db_model' end
+    local m = props.model
+    if type(m) == 'string' then m = Utils.ModelHash(m) end
+    if math.type(m) == 'float' then m = math.tointeger(m) end
+    -- GTA puede devolver el hash con signo o sin signo: comparar en 32 bits
+    local function u32(h) return h and (h & 0xFFFFFFFF) or nil end
+    if math.type(m) ~= 'integer' or u32(m) ~= u32(dbHash) then return nil, 'model_mismatch' end
+    if entity ~= nil then
+        if not DoesEntityExist(entity) or u32(GetEntityModel(entity)) ~= u32(dbHash) then return nil, 'entity_model_mismatch' end
+    end
+    local clean, dropped = { model = dbHash, plate = V.normalizePlate(dbRow.plate) }, 0
+    for k, v in pairs(props) do
+        if k ~= 'model' and k ~= 'plate' then
+            local rule = type(k) == 'string' and PROP_RULES[k]
+            local cv = rule and rule(v)
+            if cv ~= nil then clean[k] = cv else dropped = dropped + 1 end
+        end
+    end
+    if props.mileage ~= nil then
+        local old = tonumber(dbRow.mileage) or 0
+        local new = tonumber(props.mileage)
+        clean.mileage = (new and new == new and new >= old and new < 1e9) and new or old
+    end
+    local okE, encoded = pcall(json.encode, clean)
+    if not okE or type(encoded) ~= 'string' then return nil, 'props_encode' end
+    if #encoded > Security.Props.maxBytes then return nil, 'props_too_large' end
+    if dropped > 0 and Security.Config.debug then
+        print(('[%s][SECURITY] SanitizeProps %s: %d campos descartados'):format(Security.Config.resourceName, clean.plate, dropped))
+    end
+    return clean, nil, encoded
+end
+
+---------------------------------------------------------------------------
 -- SQL seguro
 ---------------------------------------------------------------------------
 --- Devuelve el identificador SQL si está en la whitelist; error si no.
