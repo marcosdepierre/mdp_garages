@@ -2,7 +2,12 @@
 -- Adapters (Integrations Engineer) implement { Server = fn(src,msg,type), Client = fn(msg,type) }.
 local function adapter()
     local setting = Config.Notify or 'auto'
-    if setting == 'auto' or setting == 'ox_lib' then return nil end
+    if setting == 'auto' then return nil end
+    -- 'framework' -> the started core's adapter name (registered by bridge/notify/framework.lua)
+    if setting == 'framework' then
+        setting = ({ qbx = 'qbx_core', qb = 'qb-core', esx = 'es_extended' })[Bridge.Framework]
+        if not setting then return nil end
+    end
     return Bridge.ResolveAdapter('notify', setting, {})
 end
 

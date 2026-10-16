@@ -28,7 +28,7 @@ Config.Keys    = 'auto'
 Config.Billing = 'auto'
 -- How fees are charged (Integrations) · 'instant' (Bridge.RemoveMoney now) | 'invoice' (billing adapter) · 'instant'
 Config.ChargeMode = 'instant'
--- Notify: explicit adapter name, otherwise ox_lib, then framework native · 'auto' | 'ox_lib' | resource · 'auto'
+-- Notify: 'auto' = ox_lib then framework native; 'framework' = the started core's notify · 'auto' | 'ox_lib' | 'framework' | resource · 'auto'
 Config.Notify  = 'auto'
 -- Phone app adapter · 'auto' | 'lb-phone' | 'npwd' | 'qb-phone' · 'auto'
 Config.Phone   = 'auto'
@@ -91,7 +91,7 @@ Config.InactivityRetireHours = 72
 ---------------------------------------------------------------------------
 -- Block takeOut when unpaid fines >= UnpaidFinesThreshold · boolean · false
 Config.BlockOnUnpaidFines = false
--- Unpaid mdp_fines rows that trigger the block · integer · 3
+-- Unpaid (paid=0 only; claiming/voided/paid excluded) mdp_fines rows that trigger the block · integer · 3
 Config.UnpaidFinesThreshold = 3
 
 ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ function Bridge.Fuel.Get()
 end
 
 -- Bridge.Fuel.Call(fnName, ...) -> result or fallback value (nil). Never throws.
--- Expected adapter functions: GetFuel(vehicle) -> number, SetFuel(vehicle, value) [client]; ox_fuel via Entity(veh).state.fuel
+-- Expected adapter functions: GetFuel(vehicle) -> number, SetFuel(vehicle, value) [client]; ox_fuel via Entity(veh).state.fuel (state bag, so it also works SERVER-side)
 function Bridge.Fuel.Call(fnName, fallback, ...)
     local impl = Bridge.Fuel.Get()
     local ok, res = Bridge.SafeCall(impl, fnName, ...)

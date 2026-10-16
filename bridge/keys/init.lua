@@ -8,7 +8,8 @@ function Bridge.Keys.Get()
 end
 
 -- Bridge.Keys.Call(fnName, ...) -> result or fallback value (nil). Never throws.
--- Expected adapter functions: GiveKeys(src|plate, plate), RemoveKeys(src, plate), HasKeys(src, plate)
+-- Expected adapter functions: GiveKeys(src, vehicle) where vehicle is an entity OR a plate string
+-- (adapters normalize to plate; qb-vehiclekeys is plate-based), RemoveKeys(src, vehicle), HasKeys(src, plate)
 function Bridge.Keys.Call(fnName, fallback, ...)
     local impl = Bridge.Keys.Get()
     local ok, res = Bridge.SafeCall(impl, fnName, ...)

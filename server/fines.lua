@@ -1,6 +1,6 @@
 -- Fine payment fallback: lib.callback mdp_garages:payFine + /mdp_payfine <id>.
--- Amount ALWAYS read from DB; client only sends fineId. Idempotent: paid flipped (affectedRows==1) BEFORE charging,
--- rolled back if the charge fails. Fines sent as external invoices are refused ('external_invoice').
+-- Amount ALWAYS read from DB; client only sends fineId. Only channel='internal' fines without a linked invoice.
+-- Claim 0->2 (affectedRows==1) before charging; 2->1 on success, 2->0 on failure. Stale claims reset on start.
 local ERROR_KEYS = {
     invalid_request = 'err_invalid_request', invalid_source = 'err_invalid_request', not_found = 'err_fine_not_found',
     invalid_amount = 'err_invalid_request', insufficient_funds = 'not_enough_money', already_paid = 'err_already_paid',
@@ -14,22 +14,29 @@ local function payFine(src, fineId)
     if not fineId or fineId <= 0 then return { ok = false, error = 'invalid_request' } end
     local ident = Bridge.GetIdentifier(src)
     if not ident then return { ok = false, error = 'invalid_source' } end
-    local row = MySQL.single.await('SELECT amount FROM mdp_fines WHERE id = ? AND owner = ? AND paid = 0', { fineId, ident })
+    local row = MySQL.single.await('SELECT amount, channel FROM mdp_fines WHERE id = ? AND owner = ? AND paid = 0', { fineId, ident })
     if not row then return { ok = false, error = 'not_found' } end
-    if Bridge.Billing.IsExternalInvoice(fineId) then return { ok = false, error = 'external_invoice' } end
+    if row.channel ~= 'internal' or Bridge.Billing.IsExternalInvoice(fineId) then return { ok = false, error = 'external_invoice' } end
     local amount = math.tointeger(row.amount)
     if not amount or not Bridge.ValidAmount(amount) then return { ok = false, error = 'invalid_amount' } end
     local ok, res = pcall(Security.WithLock, 'fine:' .. fineId, src, function()
-        if Bridge.GetMoney(src, 'bank') < amount then return { ok = false, error = 'insufficient_funds' } end
-        local affected = MySQL.update.await('UPDATE mdp_fines SET paid = 1 WHERE id = ? AND owner = ? AND paid = 0', { fineId, ident })
-        if affected ~= 1 then return { ok = false, error = 'already_paid' } end
+        -- claim (0 -> 2) before touching money; only one caller can win
+        local claimed = MySQL.update.await(
+            "UPDATE mdp_fines SET paid = 2 WHERE id = ? AND owner = ? AND paid = 0 AND channel = 'internal'", { fineId, ident })
+        if claimed ~= 1 then return { ok = false, error = 'already_paid' } end
         if not Bridge.RemoveMoney(src, 'bank', amount, 'mdp_garages fine #' .. fineId) then
-            MySQL.update.await('UPDATE mdp_fines SET paid = 0 WHERE id = ? AND paid = 1', { fineId })
+            MySQL.update.await('UPDATE mdp_fines SET paid = 0 WHERE id = ? AND paid = 2', { fineId })
             return { ok = false, error = 'insufficient_funds' }
         end
+        MySQL.update.await('UPDATE mdp_fines SET paid = 1 WHERE id = ? AND paid = 2', { fineId })
+        TriggerEvent('mdp_garages:server:finePaid', fineId, src)
         return { ok = true, data = { fineId = fineId, amount = amount } }
     end)
-    if not ok then return { ok = false, error = 'server_error' } end
+    if not ok then
+        -- error inside the lock: release a possible claim
+        pcall(MySQL.update.await, 'UPDATE mdp_fines SET paid = 0 WHERE id = ? AND paid = 2', { fineId })
+        return { ok = false, error = 'server_error' }
+    end
     if type(res) ~= 'table' then return { ok = false, error = 'locked' } end
     return res
 end

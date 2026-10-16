@@ -43,7 +43,11 @@ server_scripts {
     'bridge/billing/*.lua',
     'bridge/phone/*.lua',
     'server/security.lua', -- written by Security Engineer
+    'server/vehicles.lua',
+    'server/persistence.lua',
+    'server/garages.lua',
     'server/fines.lua',
+    'server/fine_review*.lua', -- Integrations: /mdp_finereview (glob tolerates absence)
     'server/main.lua',
     'sql/migrate.lua', -- opt-in importer (Config.Migration)
 }
