@@ -84,3 +84,14 @@ R6-2: cerrado (pcall en AddVehicle). R6-1: cerrado en persistence.lua, parcial e
 | # | Severidad | Archivo:línea | Descripción | Arreglo |
 |---|---|---|---|---|
 | P1R4-L1 | Baja | shared/utils.lua:174-178 `Utils.SameModel` | Los floats no enteros se convierten en 0 en los dos lados → `SameModel(1.5, 2.5) == true`. Un nombre de modelo como string devuelve false (se espera un hash). | Si `math.tointeger` da nil → return false; documentar que se esperan hashes o aplicar `Utils.ModelHash` dentro. |
+
+## Desde QA frontend fase 1 R2 (16/10/2026, a2700ae)
+- **Cerrado:** P1F-M1. **Abierto (parcial):** P1F-M2 (ver P1F-R2-M1/L1). P1F-M3 resuelto de hecho por el `lib.callback` asíncrono, falta confirmarlo en un cliente real.
+
+| # | Severidad | Archivo:línea | Descripción | Arreglo |
+|---|---|---|---|---|
+| P1F-R2-M1 | Media | client/zones.lua:52-53 | El éxito tardío hace toast sin comprobar el token: si ya hay otra petición en curso (después de 20 s), reemplaza su toast loading (mismo id) con el éxito de la anterior. | `elseif t.kind == 'success' and attempt == token`, o un id de toast por intento. |
+| P1F-R2-L1 | Baja | client/zones.lua:37 | El backstop de 20 s libera `busy` con la petición de ox_lib aún viva (hasta 300 s) → se puede reenviar (lo cubre el servidor). | Exigir `ox:callbackTimeout` ≤ 20000 o no liberar hasta la respuesta real. |
+| P1F-R2-L2 | Baja | client/zones.lua:53 | El error tardío después del timeout de 15 s se descarta: el jugador solo ve "timeout". | Mostrar el error tardío si `attempt == token`. |
+| P1F-R2-L3 | Baja | web/UNTITLEDUI_PATCHES.md:172 | Viñeta "Reason" en inglés que repite la sección sonner en español. El commit se describió como frontend pero toca Lua. | Juntar en un solo texto y describir el alcance real. |
+| P1F-R2-L4 | Baja | web/src/types/index.ts:60-64 | Falta el test que compara las 5 listas de códigos de error. | Test o script de CI. |

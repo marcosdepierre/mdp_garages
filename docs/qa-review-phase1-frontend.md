@@ -51,3 +51,35 @@ Ninguna Crítica ni Alta. Medias/Bajas añadidas a `docs/backlog-phase1.md`: **P
 
 ## Veredicto
 **Frontend fase 1: APROBADO** (sin bloqueantes). Antes del cierre de fase conviene: (1) que el lead confirme por escrito `sonner` (P1F-M4); (2) arreglar P1F-M1, que se resuelve en una línea; (3) medir resmon y el flujo store/park en un cliente FiveM real, que esta revisión no ha podido verificar.
+
+## R2 — a2700ae
+Revisión del commit a2700ae (16/10/2026), que dice cerrar P1F-M1 y P1F-M2.
+
+**Alcance del commit:** no es solo frontend. Toca `client/zones.lua` (Lua de cliente), `web/src/types/index.ts`, `web/dist/*` y `web/UNTITLEDUI_PATCHES.md`. Los temporizadores del bloqueo (15 s toast de timeout, 20 s liberación de `busy`) están en Lua (`guarded`), no en la NUI.
+
+**Comprobaciones:**
+- `/tmp/luac54 -p client/zones.lua` → OK.
+- `npm run build` en `web/` y `diff -r` contra el `web/dist` del commit → idénticos. `dist` reconstruido y commiteado.
+- Sin `innerHTML`/`dangerouslySetInnerHTML` en `web/src`. El commit no añade componentes nuevos. Los toasts siguen con sonner + FeaturedIcon/Button de UUI (excepción aprobada).
+- `npm run test:e2e` → todas las suites pasan.
+- Playwright headless sobre `web/dist` (vite preview) con mensajes `toast` simulados: `invalid_props` sale como "Vehicle data was rejected by the server" (no como "Request rejected"); la secuencia loading → timeout → success tardío con el mismo id deja un único toast de éxito. La carrera de R2-M1 se reproduce (ver abajo).
+- `UNTITLEDUI_PATCHES.md`: no hay sección sonner duplicada (un solo encabezado, línea 170). Se ha añadido una viñeta "Reason" en inglés que repite parte del texto (ver R2-L3).
+- Efecto colateral positivo: `lib.callback` ahora es asíncrono, así que `point:nearby` ya no se bloquea durante la petición (P1F-M3 queda resuelto de hecho; falta confirmarlo en un cliente real).
+
+**Estado:**
+- **P1F-M1: cerrado.** `invalid_props` añadido a `NUI_ERROR_CODES` (web/src/types/index.ts:61) y verificado con un toast real. No se ha añadido el test que compara las listas de códigos (R2-L4).
+- **P1F-M2: abierto (parcial).** Hasta los 20 s el bloqueo se mantiene y el éxito tardío se muestra. Pero el éxito tardío no comprueba el token y puede pisar el toast de una petición nueva (R2-M1), y a los 20 s `busy` se libera aunque la petición de ox_lib pueda seguir viva hasta 300 s (R2-L1).
+
+**Revisado sin incidencias:** liberación doble de `busy` (`release()` solo actúa si `attempt == token`; los timers de 15 s y 20 s no hacen nada cuando la petición ya se ha resuelto o ya hay otra en curso). Error en `prepare` o en el envío → `fail('server_error')`. Cerrar la NUI a mitad de petición no afecta: los toasts no dependen del panel. Desmontaje: los timers son de Lua (`SetTimeout`) y no hay timers nuevos en React.
+
+### Incidencias
+| # | Severidad | Archivo:línea | Descripción y repro | Arreglo propuesto |
+|---|---|---|---|---|
+| P1F-R2-M1 | Media | client/zones.lua:52-53 | El éxito tardío llama a `toast(t)` sin comprobar `attempt == token`. Repro: store A sin respuesta → toast timeout a 15 s → `busy` liberado a 20 s → store B (toast loading `id='store'`) → llega el éxito de A → reemplaza el loading de B con "Vehicle stored · A". El jugador cree que B ha terminado. Reproducido en la NUI con Playwright (mismo id `store`). | Mostrar el éxito tardío solo si `attempt == token`. Si no, usar un id por intento (`'store:'..token`) o un toast aparte que no reemplace el actual. |
+| P1F-R2-L1 | Baja | client/zones.lua:37, 11 | El backstop de 20 s libera `busy` mientras `lib.callback` puede seguir pendiente (`ox:callbackTimeout` = 300 s). Repro: servidor que no responde → a los 20 s `/mdp_park` vuelve a enviar mientras la primera petición sigue viva. El servidor lo cubre (WithLock + estado + RATE). Es lo que queda de P1F-M2. | Documentar y exigir `setr ox:callbackTimeout 20000` (o menos), o mantener `busy` hasta la respuesta real con un backstop ≥ el timeout de ox_lib. |
+| P1F-R2-L2 | Baja | client/zones.lua:53 | El error tardío (después del timeout de 15 s) se descarta. Repro: el servidor responde `world_limit` a los 16 s → el jugador solo ve "timeout" y no sabe por qué ha fallado. | Mostrar también el error tardío cuando `attempt == token`, con el mismo id. |
+| P1F-R2-L3 | Baja | web/UNTITLEDUI_PATCHES.md:172; mensaje del commit | La viñeta "Reason" en inglés repite, dentro de la sección en español, lo que ya dice el párrafo anterior (no es una sección duplicada). Además, el commit se presentó como un cambio de frontend o NUI, pero modifica Lua de cliente. | Juntar la viñeta con el párrafo en un solo idioma. Describir el alcance real en el commit o la nota. |
+| P1F-R2-L4 | Baja | web/src/types/index.ts:60-64 | No existe el test que compara `NUI_ERROR_CODES` con `Constants.ErrorCodes`, i18n y locales (era el arreglo propuesto en M1), así que puede volver a desincronizarse. | Test o script de CI que compare las 5 listas. |
+
+### Veredicto R2
+P1F-M1 cerrado. P1F-M2 abierto por R2-M1 (Media), que se arregla en una línea. No hay Críticas ni Altas. P1F-M3 parece resuelto como efecto colateral.
