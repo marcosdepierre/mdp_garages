@@ -49,8 +49,9 @@ local function guarded(toastId, prepare)
     local sent, err = pcall(lib.callback, spec.event, false, function(res)
         local okm, t = pcall(spec.map, type(res) == 'table' and res or { ok = false, error = 'server_error' })
         if not okm or type(t) ~= 'table' then t = { id = toastId, kind = 'error', error = 'server_error' } end
-        if not settled then settled = true; toast(t)
-        elseif t.kind == 'success' then toast(t) end -- late success replaces the timeout toast; late error stays silent
+        -- P1F-R2-M1/L2: only this attempt's toast slot; a late result (success or error, after the 15 s timeout
+        -- toast) replaces it, but never once a newer request has started (it would overwrite that one's toast).
+        if attempt == token then settled = true; toast(t) end
         release()
     end, spec.payload)
     if not sent then

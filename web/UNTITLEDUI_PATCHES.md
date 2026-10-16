@@ -169,4 +169,4 @@ regenerate the patch: diff a fresh CLI copy against `src/components/<file>` (`di
 
 ## Excepción aprobada: `sonner` (P1F-M4)
 Aprobada por Senior Developer el 2026-10-16. `sonner` se acepta como motor de toasts porque el propio Untitled UI lo declara como dependencia. El contenido de cada toast tiene que construirse con componentes de Untitled UI (FeaturedIcon, Button). Un toast con markup propio, o cualquier otra librería de toasts, sigue contando como fallo.
-- **Reason:** sonner is not an Untitled UI component. The Untitled UI Notifications and Alerts components are PRO-only and must not be imitated. Approved by the Designer (design-system §9.2/§9.3) and the Senior Developer. Version pinned exactly (`sonner@2.0.8`). Usage: `web/src/toasts.tsx` (`toast.custom` + FeaturedIcon / LoadingIndicator / Button tertiary XClose). sonner is not patched.
+Motivo: los componentes Notifications/Alerts de Untitled UI son PRO y no se imitan (aprobado también por Designer, §9.2/§9.3). Versión fijada exacta `sonner@2.0.8`; uso en `web/src/toasts.tsx`; sin parches.
