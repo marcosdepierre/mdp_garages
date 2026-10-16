@@ -79,7 +79,7 @@ function Vehicles.InsertBatch(rows)
         local ph, params, plates, wanted = {}, {}, {}, {}
         for j = i, math.min(i + size - 1, #rows) do
             local r = rows[j]
-            ph[#ph + 1] = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            ph[#ph + 1] = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'framework')"
             -- explicit indices: props/garage_id may be nil (ipairs would stop early)
             local vals = { r.plate, r.owner, r.model, (Config.VehicleTypes or {})[r.model] or r.vtype or 'automobile',
                            r.props, r.state, r.garage_id, r.fuel, r.engine, r.body }
@@ -95,7 +95,7 @@ function Vehicles.InsertBatch(rows)
             existing[e.plate] = e.owner
         end
         MySQL.update.await(
-            'INSERT INTO mdp_vehicles (plate, owner, model, vtype, props, state, garage_id, fuel, engine, body) VALUES '
+            'INSERT INTO mdp_vehicles (plate, owner, model, vtype, props, state, garage_id, fuel, engine, body, source) VALUES '
             .. table.concat(ph, ', ') .. ' ON DUPLICATE KEY UPDATE owner = VALUES(owner)', params)
         for _, p in ipairs(plates) do
             local old = existing[p]
@@ -129,7 +129,11 @@ function Vehicles.ImportFromFramework(framework, owner)
     local q = ('SELECT `%s` FROM `%s`'):format(table.concat(cols, '`, `'), tbl)
     local params = {}
     if owner then q = q .. (' WHERE `%s` = ?'):format(ownerCol); params[1] = owner end
-    local rows = MySQL.query.await(q, params) or {}
+    local okQ, rows = pcall(MySQL.query.await, q, params)
+    if not okQ or type(rows) ~= 'table' then
+        print(('^1[mdp_garages] framework query failed on %s: %s^0'):format(tbl, tostring(rows)))
+        return 0, 0, {}, 0, false
+    end
     local out, skipped = {}, {}
     for _, r in ipairs(rows) do
         local m, why = Vehicles.MapFrameworkRow(framework, r)
@@ -137,7 +141,52 @@ function Vehicles.ImportFromFramework(framework, owner)
     end
     local inserted, transferred = 0, 0
     if #out > 0 then inserted, transferred = Vehicles.InsertBatch(out) end
-    return #rows, inserted, skipped, transferred
+    local removed = 0
+    if owner and Config.SyncRemovals then removed = Vehicles.SyncRemovals(tbl, ownerCol, owner, rows) end
+    return #rows, inserted, skipped, transferred, true, removed
+end
+
+--- Config.SyncRemovals: delete this owner's framework-sourced rows whose plate disappeared from the framework table.
+--- Safety: only source='framework' rows; only after a successful query of an existing table (caller);
+--- zero framework rows while we hold framework-sourced vehicles = possible transient issue -> warn and skip.
+--- If the plate still exists in the framework under another owner, it is transferred instead of deleted.
+function Vehicles.SyncRemovals(tbl, ownerCol, owner, frameworkRows)
+    local present = {}
+    for _, r in ipairs(frameworkRows) do
+        local p = Utils.NormalizePlate(r.plate)
+        if p then present[p] = true end
+    end
+    local mine = MySQL.query.await("SELECT plate FROM mdp_vehicles WHERE owner = ? AND source = 'framework'", { owner }) or {}
+    if #mine == 0 then return 0 end
+    if #frameworkRows == 0 then
+        print(('^3[mdp_garages] sync removals skipped for %s: framework table returned 0 rows but %d framework-sourced vehicles exist (transient?)^0')
+            :format(owner, #mine))
+        return 0
+    end
+    local removed = 0
+    for _, m in ipairs(mine) do
+        local plate = m.plate
+        if not present[plate] then
+            -- identifiers are fixed literals (tbl/ownerCol chosen in ImportFromFramework), never user input
+            local other = MySQL.scalar.await(('SELECT `%s` FROM `%s` WHERE UPPER(TRIM(`plate`)) = ? LIMIT 1'):format(ownerCol, tbl), { plate })
+            pcall(Security.WithLock, plate, 0, function()
+                if other and other ~= owner then
+                    local n = MySQL.update.await("UPDATE mdp_vehicles SET owner = ? WHERE plate = ? AND owner = ? AND source = 'framework'",
+                        { other, plate, owner })
+                    if n == 1 then onOwnerChanged(plate, owner, other) end
+                    return
+                end
+                local ent = Security.GetSpawnedEntity(plate)
+                local n = MySQL.update.await("DELETE FROM mdp_vehicles WHERE plate = ? AND owner = ? AND source = 'framework'", { plate, owner })
+                if n == 1 then
+                    if ent then Security.UntrackSpawn(plate); DeleteEntity(ent) end
+                    removed = removed + 1
+                    print(('^3[mdp_garages] %s removed: no longer in %s for %s (keys/fines/impound cascade)^0'):format(plate, tbl, owner))
+                end
+            end)
+        end
+    end
+    return removed
 end
 
 ---------------------------------------------------------------------------
@@ -162,7 +211,7 @@ function Vehicles.AddVehicle(owner, plate, model, props, garageId)
     local okSel, old = pcall(MySQL.scalar.await, 'SELECT owner FROM mdp_vehicles WHERE plate = ?', { plate })
     if not okSel then return false, 'db_error' end
     local ok = pcall(MySQL.update.await,
-        [[INSERT INTO mdp_vehicles (plate, owner, model, vtype, props, state, garage_id) VALUES (?, ?, ?, ?, ?, ?, ?)
+        [[INSERT INTO mdp_vehicles (plate, owner, model, vtype, props, state, garage_id, source) VALUES (?, ?, ?, ?, ?, ?, ?, 'mdp')
           ON DUPLICATE KEY UPDATE owner = VALUES(owner)]],
         { plate, owner, model, vtype, propsJson, VS.GARAGED, garageId })
     if not ok then return false, 'db_error' end
@@ -205,10 +254,10 @@ local function syncPlayer(src, force)
     local now = GetGameTimer()
     if not force and lastSync[ident] and now - lastSync[ident] < 60000 then return end
     lastSync[ident] = now
-    local ok, read, inserted, _, transferred = pcall(Vehicles.ImportFromFramework, Bridge.Framework, ident)
+    local ok, read, inserted, _, transferred, _, removed = pcall(Vehicles.ImportFromFramework, Bridge.Framework, ident)
     if not ok then print('^1[mdp_garages] sync failed for ' .. ident .. ': ' .. tostring(read) .. '^0') return end
-    if inserted > 0 or (transferred or 0) > 0 then
-        print(('[mdp_garages] synced %s: %d read, %d new, %d transferred'):format(ident, read, inserted, transferred or 0))
+    if inserted > 0 or (transferred or 0) > 0 or (removed or 0) > 0 then
+        print(('[mdp_garages] synced %s: %d read, %d new, %d transferred, %d removed'):format(ident, read, inserted, transferred or 0, removed or 0))
     end
 end
 Vehicles.SyncPlayer = syncPlayer

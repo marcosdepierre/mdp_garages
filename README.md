@@ -33,7 +33,7 @@ A standalone garage resource for **Qbox (qbx_core)**, **QBCore (qb-core)** and *
 Tables are prefixed `mdp_` so they don't clash with ESX `owned_vehicles` or QB `player_vehicles`: `mdp_vehicles`, `mdp_vehicle_keys`, `mdp_private_garages`, `mdp_impound`, `mdp_fines`, `mdp_fine_invoices`, `mdp_schema_version`. **`mdp_vehicles` is the source of truth.** Framework tables are only read.
 
 ## Migration and sync
-- **Automatic sync** (`Config.SyncFrameworkTables = true`): runs on player load, on resource start for connected players, when the garage is opened (60 s cache) and from `AddVehicle`. Missing plates are imported and owner changes propagate (the previous owner's keys are revoked).
+- **Automatic sync** (`Config.SyncFrameworkTables = true`): runs on player load, on resource start for connected players, when the garage is opened (60 s cache) and from `AddVehicle`. Missing plates are imported and owner changes propagate (the previous owner's keys are revoked). With `Config.SyncRemovals`, vehicles that were imported from the framework (`source='framework'`) and later deleted there are removed from `mdp_vehicles` too. Vehicles added with `AddVehicle` (`source='mdp'`) and rows that existed before schema v3 are never removed.
 - **One-off migration:** set `Config.Migration.Enabled = true` (it runs once at start) or run `mdp_migrate` in the console. It imports only the detected framework's table, in batches, with `INSERT IGNORE`. ESX `type`, `job` and `stored` are respected (see `Config.Migration`).
 - **Dealerships** can call the export directly (below).
 
@@ -68,11 +68,12 @@ Every key is commented in the file as description · values · default. Summary:
 | `MaxMoneyAmount` | `1000000` | cap per money operation |
 | `Fuel` / `Keys` / `Billing` / `Notify` / `Phone` | `'auto'` | integration adapters |
 | `ChargeMode` | `'instant'` | `instant` or `invoice` |
-| `OkokTrustServerEvent` | `false` | okokBilling fees only, unverified server-side event |
+| `OkokTrustServerEvent` | `false` | okokBilling fees only. **To verify in-game** whether okok accepts the server-side event |
 | `MaxGarageDistance` / `MaxVehicleDistance` | `10.0` / `5.0` | server-side distance checks |
 | `PlateMaxLength` | `8` | plate rule 1-8 `[A-Z0-9 ]` |
 | `Security` | `{ownedTable='mdp_vehicles'}` | passed to server/security.lua |
-| `SyncFrameworkTables` | `true` | import missing plates on player load |
+| `SyncFrameworkTables` | `true` | import missing plates and owner changes from the framework table |
+| `SyncRemovals` | `true` | delete framework-sourced vehicles that were removed from the framework table (with safety checks) |
 | `Migration` | see file | `Enabled`, `Ace`, `VehicleTypes`, `SkipJobVehicles`, `NotStored`, `BatchSize` |
 | `OnRestartOutVehicles` | `'park'` | `park` (to last coords) or `garage` (to DefaultGarage) |
 | `OnDisconnect` | `'keep'` | driver disconnects: `keep` (parked in place), `garage` (DefaultGarage), `impound` |

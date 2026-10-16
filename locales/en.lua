@@ -9,18 +9,7 @@ Locales.en = {
     world_limit_server = 'The city is full of parked vehicles, use a garage',
     fine_paid = 'Fine paid: $%d',
     fine_pay_failed = 'Could not pay fine (%s)',
-    err_invalid_request = 'Invalid request',
-    err_fine_not_found = 'Fine not found or already paid',
-    err_already_paid = 'This fine is already paid',
-    err_external_invoice = 'This fine was sent as an invoice, pay it from your billing menu',
-    err_busy = 'Please wait a moment and try again',
-    err_generic = 'Something went wrong',
-    err_retired_vehicle = 'This vehicle was retired, recover it from the phone app',
-    err_already_out = 'This vehicle is already out',
-    err_no_spawn = 'No free spawn point',
     vehicle_out = 'Vehicle %s is ready',
-    err_wrong_vehicle_type = 'This garage does not accept this type of vehicle',
-    err_not_ready = 'The garage system is starting, try again in a moment',
     -- UI strings sent to the NUI in the 'open' message (locale field)
     -- /mdp_finereview (Integrations)
     finereview_usage = 'Usage: /mdp_finereview <id> paid|void',
@@ -89,5 +78,7 @@ Locales.en = {
         err_invalid_source = 'Player not loaded',
         err_already_paid = 'This fine is already paid',
         err_invalid_amount = 'Invalid amount',
+        err_impounded = 'This vehicle is impounded, release it at the impound lot',
+        err_fine_not_found = 'Fine not found or already paid',
     },
 }

@@ -2,13 +2,8 @@
 -- Amount ALWAYS read from DB; client only sends fineId. Only channel='internal' fines without a linked invoice.
 -- Claim 0->2 CHARGING (affectedRows==1) before charging; 2->1 on success, 2->0 on charge failure.
 -- Rows left in CHARGING after a crash are moved to channel needs_review on start (never reset: money may be taken).
-local ERROR_KEYS = {
-    invalid_request = 'err_invalid_request', invalid_source = 'err_invalid_request', not_found = 'err_fine_not_found',
-    invalid_amount = 'err_invalid_request', insufficient_funds = 'not_enough_money', already_paid = 'err_already_paid',
-    external_invoice = 'err_external_invoice', locked = 'err_busy', rate_limited = 'err_busy', not_ready = 'err_not_ready',
-}
-
-local function errText(code) return _L(ERROR_KEYS[code] or 'err_generic') end
+-- Error codes are the documented ones (Constants.ErrorCodes); text comes from locale ui.err_<code>.
+local function errText(code) return Utils.ErrorText(code) end
 
 local function payFine(src, fineId)
     fineId = math.tointeger(tonumber(fineId) or -1)
@@ -16,7 +11,7 @@ local function payFine(src, fineId)
     local ident = Bridge.GetIdentifier(src)
     if not ident then return { ok = false, error = 'invalid_source' } end
     local row = MySQL.single.await('SELECT amount, channel FROM mdp_fines WHERE id = ? AND owner = ? AND paid = 0', { fineId, ident })
-    if not row then return { ok = false, error = 'not_found' } end
+    if not row then return { ok = false, error = 'fine_not_found' } end
     if row.channel ~= 'internal' or Bridge.Billing.IsExternalInvoice(fineId) then return { ok = false, error = 'external_invoice' } end
     local amount = math.tointeger(row.amount)
     if not amount or not Bridge.ValidAmount(amount) then return { ok = false, error = 'invalid_amount' } end
@@ -50,7 +45,7 @@ MDP.Callback('mdp_garages:payFine', {
 RegisterCommand('mdp_payfine', function(src, args)
     if src == 0 then return end
     if not Security.RateLimit(src, 'cmd:payfine', 2, 2000) then return end
-    if not MDP.Ready then return Bridge.Notify(src, _L('err_not_ready'), 'error') end
+    if not MDP.Ready then return Bridge.Notify(src, Utils.ErrorText('not_ready'), 'error') end
     local res = payFine(src, args[1])
     if res.ok then
         Bridge.Notify(src, _L('fine_paid', res.data.amount), 'success')

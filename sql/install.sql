@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS `mdp_vehicles` (
   `engine`      FLOAT        NOT NULL DEFAULT 1000,
   `body`        FLOAT        NOT NULL DEFAULT 1000,
   `mileage`     DOUBLE       NOT NULL DEFAULT 0 COMMENT 'km',
+  `source`      VARCHAR(16)  NOT NULL DEFAULT 'mdp' COMMENT 'framework = imported by sync/migrate (eligible for SyncRemovals); mdp = AddVehicle/own',
   `garage_id`   VARCHAR(64)  NULL COMMENT 'public|private|impound:<id>',
   `parked_at`   TIMESTAMP    NULL DEFAULT NULL COMMENT 'when state became parked_world (inactivity retire, phase 7)',
   `created_at`  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -30,7 +31,8 @@ CREATE TABLE IF NOT EXISTS `mdp_vehicles` (
   KEY `idx_mdp_vehicles_state` (`state`),
   KEY `idx_mdp_vehicles_garage` (`garage_id`),
   KEY `idx_mdp_vehicles_state_parked` (`state`, `parked_at`),
-  KEY `idx_mdp_vehicles_owner_garage` (`owner`, `garage_id`, `state`)
+  KEY `idx_mdp_vehicles_owner_garage` (`owner`, `garage_id`, `state`),
+  KEY `idx_mdp_vehicles_owner_source` (`owner`, `source`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `mdp_vehicle_keys` (
@@ -117,6 +119,6 @@ CREATE TABLE IF NOT EXISTS `mdp_schema_version` (
   PRIMARY KEY (`version`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-INSERT IGNORE INTO `mdp_schema_version` (`version`) VALUES (1), (2);
--- v2: mdp_vehicles.vtype. Existing v1 installs are upgraded automatically on resource start
+INSERT IGNORE INTO `mdp_schema_version` (`version`) VALUES (1), (2), (3);
+-- v2: mdp_vehicles.vtype. v3: mdp_vehicles.source. Existing v1 installs are upgraded automatically on resource start
 -- (server/persistence.lua) or manually with sql/upgrade_v2.sql.

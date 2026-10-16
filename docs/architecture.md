@@ -49,13 +49,13 @@ Dependencies: **oxmysql** and **ox_lib** (hard; `@ox_lib/init.lua` is a shared s
 Tables are prefixed `mdp_` so they don't clash with ESX `owned_vehicles` / QB `player_vehicles`. All use InnoDB and utf8mb4.
 | Table | Purpose | Key indexes / FKs |
 |---|---|---|
-| `mdp_vehicles` | one row per owned vehicle: props, coords JSON, heading, `state` TINYINT, `vtype` (v2), fuel, engine, body, mileage, garage_id | UNIQUE plate; owner, state, garage_id |
+| `mdp_vehicles` | one row per owned vehicle: props, coords JSON, heading, `state` TINYINT, `vtype` (v2), `source` (v3: `framework` = imported by sync/migrate, `mdp` = AddVehicle/own or pre-v3), fuel, engine, body, mileage, garage_id | UNIQUE plate; owner, state, garage_id |
 | `mdp_vehicle_keys` | shared keys | UNIQUE(plate, holder); holder; FK plate CASCADE |
 | `mdp_private_garages` | purchased garages with interior; `config_id` = property key from server config | owner; UNIQUE(owner, config_id) stops a double click from buying twice; UNIQUE(owner, label) |
 | `mdp_impound` | impound records (fee, release_after, location, released) | plate, released; FK plate CASCADE |
 | `mdp_fines` | fines; `channel` ENUM internal/invoice/external/needs_review, `paid` 0/1/2/3 (unpaid/paid/claiming/voided) | plate, owner, paid; FK plate CASCADE |
 | `mdp_fine_invoices` | billing invoice → fine mapping (`provider`, `invoice_id`, `fine_id`), written by `Bridge.BillingCommon.Link` and read by `Bridge.BillingCommon.OnPaid` (bridge/billing/_common.lua; the table is created by `sql/install.sql`) | PK(provider, invoice_id); fine_id `INT UNSIGNED` FK → `mdp_fines(id)` ON DELETE CASCADE |
-| `mdp_schema_version` | applied schema versions (currently **2**: v2 adds `mdp_vehicles.vtype`; `server/persistence.lua` checks `information_schema` at start and ALTERs only if the column is missing; manual alternative `sql/upgrade_v2.sql`); future phases add idempotent ALTERs keyed by version. The server warns at start if the version is lower than `Constants.SchemaVersion` | PK(version) |
+| `mdp_schema_version` | applied schema versions (currently **3**: v2 adds `mdp_vehicles.vtype`, v3 adds `mdp_vehicles.source`). `server/persistence.lua` checks `information_schema` at start and ALTERs only what's missing; manual alternative for v2: `sql/upgrade_v2.sql`. The server warns at start if the version is lower than `Constants.SchemaVersion` | PK(version) |
 
 `state` constants (`shared/constants.lua`): `Constants.VehicleState`: `0=OUT, 1=GARAGED, 2=PARKED_WORLD, 3=IMPOUNDED, 4=RETIRED`.
 
@@ -69,7 +69,8 @@ Tables are prefixed `mdp_` so they don't clash with ESX `owned_vehicles` / QB `p
 - `Utils.ResolveGarageId(garageId, plate) -> id, remapped`: used wherever a stored garage_id is loaded and in migrate.lua. An invalid format, or a `public:` id missing from `Config.Garages`, is remapped to `Config.DefaultGarage` with a console warning that shows the plate and the original value. `private:`/`impound:` ids are checked by format only.
 - `Utils.GetGarage(id, expectedKind) -> garage | nil, err`: **every** garage lookup and `distance.getCoords` must go through it. It confirms the garage exists (public/impound in `Config.Garages`; private through the server-set `Utils.PrivateGarageLookup(id)` DB resolver) and that its kind matches the action. Impound garages are only valid for `releaseImpound`; public/private garages are valid for `takeOut`/`storeVehicle`/`getVehicles`. Errors: `invalid_garage`, `wrong_garage_kind`, `unknown_garage`.
 - `Utils.ModelHash(model)`: `tonumber(model) or joaat(model)`, normalized to signed 32-bit. **This is the single helper used wherever a model is spawned or compared** (ESX stores numeric hashes, QB stores names).
-- `Utils.UILocale()`: the NUI locale table.
+- `Utils.UILocale()`: the NUI locale table (in `shared/utils.lua`; not a global).
+- `Utils.ErrorCode(err)` / `Utils.ErrorText(code)`: normalize to a documented code, and get its localized text.
 - `Utils.FormatMileage(km)`: the DB always stores km; display follows `Config.MileageUnit` (`'km'` | `'mi'`).
 
 ## Security module (server/security.lua, Security Engineer; see [security.md](security.md))
@@ -84,7 +85,9 @@ All state-changing endpoints are registered with **`Security.RegisterSecureCallb
 
 - `resolvePlate = Vehicles.ResolvePlateFromNetId`: wraps `Security.PlateFromNetId(netId) -> plate, nil, ent | nil, err`. The server-side plate is stored in `data._plate`; any `_plate` the client sends is stripped. A failure rejects with `plate_unresolved:<err>` (`bad_netid`, `no_entity`, `not_vehicle`, `bad_plate`). `requireOwnership` then checks `data._plate`. **Every netId-based handler** (storeVehicle, parkWorld, towVehicle, issueFine, impoundVehicle, syncWear) uses it, and handlers only ever use `data._plate`.
 
-Other helpers: `Security.WithLock(plate, src, fn, ...)` (per-plate lock, released even if `fn` errors) / `Security.Lock(plate, src)` / `Unlock(plate)`, `Security.IsKeyHolder`, `Security.TrackSpawn` / `UntrackSpawn` / `GetSpawnedEntity` (spawn registry by plate), `Security.RateLimit`, `Security.V.*` validators, `Security.LogReject`, and the `Security.OnSuspicious` hook.
+**Validation order** in `runChecks` (Security): (1) source is valid, (2) rate limit, (3) schema (strips any client `_plate`), (4) `resolvePlate` → `data._plate`, (5) job, (6) distance, (7) DB ownership (`requireOwnership`). The cheap checks run before the DB query.
+
+Other helpers: `Security.WithLock(plate, src, fn, ...)` (per-plate lock, released even if `fn` errors) / `Security.Lock(plate, src) -> token|nil` / `Security.Unlock(plate, token)` (the token ensures only the lock's owner can release it; none of our files call `Lock`/`Unlock` directly, they all use `WithLock`), `Security.IsKeyHolder`, `Security.TrackSpawn` / `UntrackSpawn` / `GetSpawnedEntity` (spawn registry by plate), `Security.RateLimit`, `Security.V.*` validators, `Security.LogReject`, and the `Security.OnSuspicious` hook.
 
 ## Server namespace
 Server modules hang off one global, `MDP` (`server/core.lua`): `MDP.Ready`, `MDP.Callback` (a `Security.RegisterSecureCallback` wrapper that returns `{ok=false, error='not_ready'}` until startup recovery finishes) and `MDP.Vehicles`. Integration helpers live under `Bridge.*Common`.
@@ -92,6 +95,10 @@ Server modules hang off one global, `MDP` (`server/core.lua`): `MDP.Ready`, `MDP
 ## Source of truth and framework tables
 `mdp_vehicles` is the source of truth. Framework tables are only read, never written.
 - **Upsert:** sync, migration and `AddVehicle` use `INSERT … ON DUPLICATE KEY UPDATE owner = VALUES(owner)`. If a plate's owner changed in the framework, **all keys of that plate are revoked** (`DELETE FROM mdp_vehicle_keys WHERE plate=?`) and the change is logged.
+- **Removals** (`Config.SyncRemovals = true`): during a player's sync, their rows with **`source='framework'`** whose plate no longer exists in the framework table are deleted (keys, fines and impound rows cascade). A world entity for the plate is untracked and deleted, and each removal is logged. If the plate still exists under another owner, it is transferred instead. Safety rules:
+  - only `source='framework'` rows are touched (never `AddVehicle` rows or rows that existed before v3);
+  - removals only run when the framework table exists and the query succeeded;
+  - if the framework returns **zero rows** while the player has framework-sourced vehicles, removals are skipped with a warning, since that could be a transient issue.
 - **Sync triggers:** player load (forced); resource start for players already connected (after recovery); inside `AddVehicle` when the owner is online; and lazily in `getVehicles` (60 s cache per identifier).
 - **Sync on load** (`Config.SyncFrameworkTables = true`): on `esx:playerLoaded` / `QBCore:Server:PlayerLoaded` (also fired by Qbox), the player's rows in `owned_vehicles` / `player_vehicles` are imported. Plates are normalized, garages are resolved with `Utils.ResolveGarageId`, rows go in with a batched `INSERT IGNORE`, and the same ESX type/job/stored rules as the migration apply. This way dealership purchases appear in the garage.
 - **Export for dealerships:** `exports.mdp_garages:AddVehicle(owner, plate, model, props?, garageId?) -> ok, err?`. It validates the owner (string, 64 characters max), plate (rule above), model (`[%w_]`, 64 characters max) and props (table or JSON, 64 KB max), resolves the garage id, and inserts with `INSERT IGNORE` as GARAGED. Returns `true, nil|'exists'|'transferred'` or `false, err` (`invalid_owner`, `invalid_plate`, `invalid_model`, `invalid_props`, `db_error`). `model` can be a name or a numeric hash.
@@ -200,7 +207,7 @@ The UI is React + Untitled UI, built to `web/dist` (manifest: `ui_page 'web/dist
 { action = 'update', data = table, view? = 'list' | 'detail', plate? = string }   -- partial: data is MERGED onto the current state (only the keys sent change)
 { action = 'close' }
 ```
-`OpenGarageUI(view, data)` sends `open` and calls `SetNuiFocus(true, true)`. **Closing is NUI-only**: the NUI handles ESC and calls `close`. While the UI is open, the client runs a per-frame loop that only disables the pause-menu controls (199, 200), and the loop exits when the UI closes. There is no ESC handling in Lua.
+`OpenGarageUI(view, data)` sends `open` and calls `SetNuiFocus(true, true)`. **Closing is NUI-only**: the NUI handles ESC and calls `close`. While the UI is open, the client runs a per-frame loop that only disables the pause-menu controls (199, 200), and the loop exits when the UI closes. There is no ESC handling in Lua. Pause-menu blocking continues for about 250 ms after close so the closing ESC can't open the pause menu. Stuck-focus recovery (checked every 500 ms, not ESC-based) calls `UI.Close()`, which also hides the NUI. `OpenGarageUI` refuses to open without `data.garage.id`.
 
 `UILocale` is a flat `{ [key] = string }` table built by `Utils.UILocale()` from the active locale's `ui` sub-table, with English filling any missing key. Keys: `title, close, back, vehicles, search, empty, loading, take_out, details, retired_section, retired_hint, state_out, state_garaged, state_parked, state_impounded, state_retired, state_unknown, select_vehicle, plate, model, fuel, engine, body, mileage, location, owner, key_holder, impound_fee, release_after, error`, plus **`err_<code>` for every error code** listed below. The NUI shows `locale['err_'..code]`, falling back to its English table. The NUI must not hardcode any user-facing text.
 
@@ -236,6 +243,8 @@ Vehicle = {
 }
 ```
 
+**Take-out rules (server and UI must agree):** `canTakeOut` = state **1 or 2** (2 is the safety net until the phase 1 streamer). State **3** (impounded) is **shown only**: `getVehicles` also works in `impound:*` garages for display, `takeOut` refuses with `impounded`, and the paid release at the lot comes in phase 5 (`releaseImpound`).
+
 **Retired vehicles (state 4, phase 7):** they are listed in a separate **'Retired'** section with no take-out button (recovery is through the phone app). `mdp_garages:takeOut` refuses them with `retired`.
 
 **Server responses:** `mdp_garages:getVehicles` returns `{ok=true, data=Vehicle[]}` and `mdp_garages:takeOut` returns `{ok=true, data={netId}}`, or `{ok=false, error}` (implemented in `server/garages.lua`). The client passes them straight to `cb(res)`.
@@ -247,7 +256,44 @@ Vehicle = {
 | `getVehicles` | `{ garage_id: string }` | `Vehicle[]` | validates `Utils.IsValidGarageId`, proxies `lib.callback.await('mdp_garages:getVehicles')` |
 | `takeOut` | `{ plate: string, garage_id: string }` | `{ netId: number }` | normalizes and validates the plate and garage_id, proxies `mdp_garages:takeOut`, closes the UI on success |
 
-Error codes (each has a locale key `err_<code>`): `invalid_request`, `invalid_garage`, `wrong_garage_kind`, `unknown_garage`, `wrong_garage`, `server_error`, `rejected`, `not_found`, `not_owner`, `too_far`, `rate_limited`, `locked`, `already_out`, `retired`, `no_spawn`, `spawn_failed`, `unpaid_fines`, `insufficient_funds`, `world_limit`, `external_invoice`, `not_ready`, `wrong_vehicle_type`, `plate_unresolved`, `invalid_state`, `not_in_vehicle`, `clone_detected`, `not_tracked`, `invalid_source`, `already_paid`, `invalid_amount`, and **`timeout`**, which is UI-only: the NUI generates it client-side when a callback doesn't answer, and the server never sends it. Security rejections reach the client as `false, reason`; `client/main.lua` converts them to `{ok=false, error=code}`, stripping any `:<detail>` suffix (for example `plate_unresolved:no_entity` becomes `plate_unresolved`). Prices and fees are never accepted from the NUI; the server computes them from config/DB.
+### Error codes (single source of truth)
+This list is definitive. `Constants.ErrorCodes` (Lua), the locale keys `ui.err_<code>` (en/es) and the NUI's `NUI_ERROR_CODES` / `i18n.tsx` must all match it exactly.
+
+- `invalid_request`
+- `invalid_garage`
+- `wrong_garage_kind`
+- `unknown_garage`
+- `wrong_garage`
+- `server_error`
+- `rejected`
+- `not_found`
+- `not_owner`
+- `too_far`
+- `rate_limited`
+- `locked`
+- `already_out`
+- `retired`
+- `impounded`
+- `no_spawn`
+- `spawn_failed`
+- `unpaid_fines`
+- `insufficient_funds`
+- `world_limit`
+- `external_invoice`
+- `not_ready`
+- `wrong_vehicle_type`
+- `plate_unresolved`
+- `invalid_state`
+- `not_in_vehicle`
+- `clone_detected`
+- `not_tracked`
+- `invalid_source`
+- `already_paid`
+- `invalid_amount`
+- `fine_not_found`
+- `timeout`
+
+`timeout` is **NUI-only**: the NUI generates it when a callback doesn't answer, and the server never sends it. `impounded` applies to state 3 (paid release is phase 5), and `fine_not_found` comes from payFine. On the client, `Utils.ErrorCode` strips any `:<detail>` suffix (for example `plate_unresolved:no_entity` becomes `plate_unresolved`) and maps undocumented codes, such as internal Security reasons like `job_denied` or `unknown_field`, to `rejected`. Notifications use `Utils.ErrorText(code)`, which reads `ui.err_<code>`. Prices and fees are never accepted from the NUI; the server computes them from config/DB.
 
 ## Events and callbacks (planned)
 All request/response endpoints use **ox_lib `lib.callback`** only (there is no event fallback) and are registered through `Security.RegisterSecureCallback`. Validation codes:
@@ -262,7 +308,7 @@ All request/response endpoints use **ox_lib `lib.callback`** only (there is no e
 
 | Name | Type | Direction | Triggered by | Payload | Server validation |
 |---|---|---|---|---|---|
-| `mdp_garages:getVehicles` | lib.callback | C→S | NUI `getVehicles` | `{garage_id}` | RATE(5/10s), schema `garage_id=V.isGarageId`, GAR(`{public,private}`), DIST(garage 10 m); returns only vehicles the player owns or holds keys for, coords filtered by the visibility rule |
+| `mdp_garages:getVehicles` | lib.callback | C→S | NUI `getVehicles` | `{garage_id}` | RATE(5/10s), schema `garage_id=V.isGarageId`, GAR(`{public,private,impound}`; impound is display only), DIST(garage 10 m); returns only vehicles the player owns or holds keys for, coords filtered by the visibility rule |
 | `mdp_garages:takeOut` | lib.callback | C→S | NUI `takeOut` | `{plate, garage_id}` | **Implemented.** not_ready guard, schema, RATE(1/s), GAR(`{public,private}`), DIST, `requireOwnership`, type check, fines threshold. State 1 in this garage, **or state 2 as a safety net** until the phase 1 proximity streamer (any garage; a tracked world entity for the plate is deleted first). Inside `WithLock(plate, src, fn)`: conditional `UPDATE … WHERE plate=? AND state=<read state>` (affectedRows == 1), `CreateVehicleServerSetter(Utils.ModelHash(model), vtype, …)`, rollback to state 1 on spawn failure, `TrackSpawn`. Phase 1 (QA N6): give keys and apply fuel/engine/body |
 | `mdp_garages:storeVehicle` | lib.callback | C→S | player in a garage zone | `{netId, garage_id, vclass?}` | **Implemented** (`server/garages.lua`). RATE(1/s), schema, GAR(`{public,private}`), DIST(garage 10 m + vehicle 5 m). `resolvePlate` (`Security.PlateFromNetId`: entity must exist and be a vehicle, plate read and normalized server-side) → `data._plate`, `requireOwnership` on `data._plate`; model must match the DB; vtype resolved and checked against `garage.types`. Inside `WithLock(plate, src, fn)`: `UPDATE … WHERE state IN (0,2)` (affectedRows == 1) saving vtype and server-read health, `UntrackSpawn`, delete entity The player must be inside the vehicle (`not_in_vehicle`), and it must be the tracked entity (`Security.GetSpawnedEntity(plate) == veh`): a clone with the same plate is deleted and rejected (`clone_detected`); an untracked vehicle gets `not_tracked`. The model is compared with `Utils.ModelHash`. |
 | `mdp_garages:parkWorld` | lib.callback | C→S | player parks on the street | `{netId}` | RATE(1/s), DIST(vehicle 5 m), `resolvePlate` → `data._plate`, OWN, world limits (refused with `world_limit` + notify), `WithLock(plate, src, fn)`, ATOM(0→2), sets `parked_at`, coords/heading read from the server entity |

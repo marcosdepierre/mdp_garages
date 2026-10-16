@@ -102,3 +102,25 @@ function Utils.ModelHash(model)
     end
     return joaat(tostring(model))
 end
+
+--- UI strings table for the NUI: active locale's `ui` merged over English (missing keys fall back).
+--- Lives in Utils (utils.lua loads after locale.lua; Locales are read at call time).
+function Utils.UILocale()
+    local out = {}
+    for k, v in pairs((Locales.en and Locales.en.ui) or {}) do out[k] = v end
+    local lang = Locales[Config.Locale]
+    for k, v in pairs((lang and lang.ui) or {}) do out[k] = v end
+    return out
+end
+
+--- Normalize any error string to a documented code: strips ':<detail>', unknown codes -> 'rejected'.
+function Utils.ErrorCode(err)
+    local code = tostring(err or 'rejected'):match('^([%w_]+)') or 'rejected'
+    return Constants.ErrorCodes[code] and code or 'rejected'
+end
+
+--- Localized text for an error code (ui.err_<code>), for server/client notifications.
+function Utils.ErrorText(code)
+    local ui = Utils.UILocale()
+    return ui['err_' .. Utils.ErrorCode(code)] or ui.error or tostring(code)
+end

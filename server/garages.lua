@@ -1,6 +1,12 @@
 -- Garage callbacks used by the NUI (client proxies them 1:1). Responses: { ok, error?, data? }.
 local VS = Constants.VehicleState
-local GARAGE_KINDS = { public = true, private = true }
+local GARAGE_KINDS = { public = true, private = true }           -- takeOut / storeVehicle
+local LIST_KINDS = { public = true, private = true, impound = true } -- getVehicles (impound: show only, release is phase 5)
+
+local function listCoords(_, data)
+    local g = Utils.GetGarage(data and data.garage_id, LIST_KINDS)
+    return g and g.coords or nil
+end
 
 local function garageCoords(_, data)
     local g = Utils.GetGarage(data and data.garage_id, GARAGE_KINDS)
@@ -41,9 +47,9 @@ end
 MDP.Callback('mdp_garages:getVehicles', {
     rateLimit = { max = 5, windowMs = 10000 },
     schema = { garage_id = Security.V.isGarageId },
-    distance = { getCoords = garageCoords, max = Config.MaxGarageDistance },
+    distance = { getCoords = listCoords, max = Config.MaxGarageDistance },
 }, function(src, data)
-    local garage, err = Utils.GetGarage(data.garage_id, GARAGE_KINDS)
+    local garage, err = Utils.GetGarage(data.garage_id, LIST_KINDS)
     if not garage then return { ok = false, error = err } end
     MDP.Vehicles.SyncPlayer(src) -- lazy framework sync, 60 s cache (QA N7)
     local list = listVehicles(src, garage)
@@ -81,6 +87,7 @@ MDP.Callback('mdp_garages:takeOut', {
     if tonumber(row.state) == VS.RETIRED then return { ok = false, error = 'retired' } end
     local state = tonumber(row.state)
     -- QA N2 safety net (until the phase 1 proximity streamer): PARKED_WORLD can also be taken out from any garage
+    if state == VS.IMPOUNDED then return { ok = false, error = 'impounded' } end -- paid release: phase 5
     if state ~= VS.GARAGED and state ~= VS.PARKED_WORLD then return { ok = false, error = 'already_out' } end
     if state == VS.GARAGED and row.garage_id ~= data.garage_id then return { ok = false, error = 'wrong_garage' } end
     local vtype = Utils.IsValidVehicleType(row.vtype) and row.vtype or 'automobile'

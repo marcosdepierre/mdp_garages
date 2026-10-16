@@ -9,18 +9,7 @@ Locales.es = {
     world_limit_server = 'La ciudad está llena de vehículos aparcados, usa un garaje',
     fine_paid = 'Multa pagada: $%d',
     fine_pay_failed = 'No se pudo pagar la multa (%s)',
-    err_invalid_request = 'Petición no válida',
-    err_fine_not_found = 'Multa no encontrada o ya pagada',
-    err_already_paid = 'Esta multa ya está pagada',
-    err_external_invoice = 'Esta multa se envió como factura, págala desde tu menú de facturas',
-    err_busy = 'Espera un momento e inténtalo de nuevo',
-    err_generic = 'Algo salió mal',
-    err_retired_vehicle = 'Este vehículo fue retirado, recupéralo desde la app del teléfono',
-    err_already_out = 'Este vehículo ya está fuera',
-    err_no_spawn = 'No hay ningún punto de aparición libre',
     vehicle_out = 'El vehículo %s está listo',
-    err_wrong_vehicle_type = 'Este garaje no admite este tipo de vehículo',
-    err_not_ready = 'El sistema de garajes se está iniciando, inténtalo en un momento',
     -- UI strings sent to the NUI in the 'open' message (locale field)
     -- /mdp_finereview (Integrations)
     finereview_usage = 'Uso: /mdp_finereview <id> paid|void',
@@ -89,5 +78,7 @@ Locales.es = {
         err_invalid_source = 'Jugador no cargado',
         err_already_paid = 'Esta multa ya está pagada',
         err_invalid_amount = 'Importe no válido',
+        err_impounded = 'Este vehículo está embargado, recupéralo en el depósito',
+        err_fine_not_found = 'Multa no encontrada o ya pagada',
     },
 }

@@ -29,7 +29,7 @@ Config.Billing = 'auto'
 -- How fees are charged (Integrations) · 'instant' (Bridge.RemoveMoney now) | 'invoice' (billing adapter) · 'instant'
 Config.ChargeMode = 'instant'
 -- okokBilling only (fees with ChargeMode = 'invoice', never fines): trust TriggerEvent('okokBilling:CreateCustomInvoice')
--- from the server. UNVERIFIED whether okok accepts it without a client source · boolean · false
+-- from the server. TO VERIFY IN-GAME: unknown whether okok accepts it without a client source · boolean · false
 Config.OkokTrustServerEvent = false
 -- Notify: 'auto' = ox_lib then framework native; 'framework' = the started core's notify · 'auto' | 'ox_lib' | 'framework' | resource · 'auto'
 Config.Notify  = 'auto'
@@ -58,6 +58,10 @@ Config.Security = { ownedTable = 'mdp_vehicles', despawnOnDropMs = nil }
 -- On player load, import plates missing from mdp_vehicles out of owned_vehicles / player_vehicles
 -- (INSERT IGNORE, originals untouched) so dealership purchases appear · boolean · true
 Config.SyncFrameworkTables = true
+-- During a player's sync, DELETE their vehicles that no longer exist in the framework table (cascade keys/fines/impound,
+-- despawn if in world). Only rows with source='framework' (imported by sync/migrate), only after a successful query;
+-- skipped with a warning if the framework returns 0 rows while framework-sourced vehicles exist · boolean · true
+Config.SyncRemovals = true
 -- One-off importer (sql/migrate.lua). Enabled = run once on start; also restricted command `mdp_migrate`
 --   Ace: ace permission for in-game use · string · 'command.mdp_migrate'
 --   VehicleTypes: ESX `type` -> import? (unknown types skipped) · table · cars only

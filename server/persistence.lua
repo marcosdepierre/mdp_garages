@@ -33,6 +33,8 @@ end
 local UPGRADES = {
     { 'mdp_vehicles', 'parked_at', "ALTER TABLE `mdp_vehicles` ADD COLUMN `parked_at` TIMESTAMP NULL DEFAULT NULL" },
     { 'mdp_vehicles', 'vtype', "ALTER TABLE `mdp_vehicles` ADD COLUMN `vtype` VARCHAR(16) NOT NULL DEFAULT 'automobile' AFTER `model`" },
+    -- v3: existing rows default to 'mdp' (never auto-removed); only rows imported after v3 are 'framework'
+    { 'mdp_vehicles', 'source', "ALTER TABLE `mdp_vehicles` ADD COLUMN `source` VARCHAR(16) NOT NULL DEFAULT 'mdp' AFTER `body`" },
     { 'mdp_fines', 'channel', "ALTER TABLE `mdp_fines` ADD COLUMN `channel` ENUM('internal','invoice','external','needs_review') NOT NULL DEFAULT 'internal'" },
     -- existing rows get '' ; UNIQUE(owner, config_id) is only created by install.sql on fresh installs
     { 'mdp_private_garages', 'config_id', "ALTER TABLE `mdp_private_garages` ADD COLUMN `config_id` VARCHAR(32) NOT NULL DEFAULT '' AFTER `owner`" },
@@ -62,7 +64,7 @@ local function upgradeSchema()
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci]])
         print('[mdp_garages] schema upgrade: created mdp_fine_invoices')
     end
-    MySQL.insert.await('INSERT IGNORE INTO mdp_schema_version (version) VALUES (1), (2)')
+    MySQL.insert.await('INSERT IGNORE INTO mdp_schema_version (version) VALUES (1), (2), (3)')
 end
 
 local function onStart()

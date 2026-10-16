@@ -10,12 +10,18 @@ end
 --- Open the garage UI. view = 'list' | 'detail'
 --- plate (optional): vehicle to show in the detail view
 function UI.Open(view, data, plate)
+    -- NUI needs a garage to act on (QA NUI N6): refuse to open without one
+    if type(data) ~= 'table' or type(data.garage) ~= 'table' or not data.garage.id then
+        print('^3[mdp_garages] OpenGarageUI called without data.garage, not opening^0')
+        return false
+    end
     SendNUIMessage({ action = 'open', view = view or 'list', data = data or {}, plate = plate, locale = Utils.UILocale() })
     SetNuiFocus(true, true)
     if not UI.open then
         UI.open = true
         blockPauseWhileOpen()
     end
+    return true
 end
 
 --- Partial update: NUI merges `data` onto its current state.
@@ -36,11 +42,10 @@ exports('CloseGarageUI', UI.Close)
 local function serverCall(name, payload)
     local ok, res, err = pcall(lib.callback.await, name, false, payload)
     if not ok then return { ok = false, error = 'server_error' } end
-    if res == false then -- Security rejection (false, reason); 'plate_unresolved:<detail>' -> 'plate_unresolved'
-        local code = tostring(err or 'rejected'):match('^([%w_]+)') or 'rejected'
-        return { ok = false, error = code }
-    end
+    -- Security rejection (false, reason): strip ':<detail>', undocumented codes -> 'rejected'
+    if res == false then return { ok = false, error = Utils.ErrorCode(err) } end
     if type(res) ~= 'table' then return { ok = false, error = 'server_error' } end
+    if res.ok == false then res.error = Utils.ErrorCode(res.error) end
     return res
 end
 
@@ -78,10 +83,18 @@ function blockPauseWhileOpen()
             local now = GetGameTimer()
             if now > graceUntil and now >= nextFocusCheck then
                 nextFocusCheck = now + 500
-                if not IsNuiFocused() then setClosed() break end
+                -- QA NUI N2: close properly (hides the NUI too), not just drop focus
+                if not IsNuiFocused() then UI.Close() break end
             end
             DisableControlAction(0, 199, true) -- INPUT_FRONTEND_PAUSE
             DisableControlAction(0, 200, true) -- INPUT_FRONTEND_PAUSE_ALTERNATE
+            Wait(0)
+        end
+        -- QA NUI N8: keep blocking the pause menu ~250 ms after close so the closing ESC can't leak
+        local untilT = GetGameTimer() + 250
+        while not UI.open and GetGameTimer() < untilT do
+            DisableControlAction(0, 199, true)
+            DisableControlAction(0, 200, true)
             Wait(0)
         end
     end)
