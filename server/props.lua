@@ -72,7 +72,6 @@ end)
 
 --- N6: unpredictable single-use token (several randoms mixed with timers and a counter).
 local tokenSeq = 0
-math.randomseed((os.time() ~ (GetGameTimer() << 16)) & 0x7FFFFFFF)
 function MDP.Props.NewToken()
     tokenSeq = tokenSeq + 1
     local a, b, c = math.random(0, 0x7FFFFFFF), math.random(0, 0x7FFFFFFF), math.random(0, 0x7FFFFFFF)
@@ -112,6 +111,7 @@ local function doSpawn(holder, row, x, y, z, heading, ownerSrc)
     local t = GetGameTimer() + 3000
     while (not veh or veh == 0 or not DoesEntityExist(veh)) and GetGameTimer() < t do Wait(50) end
     if not veh or veh == 0 or not DoesEntityExist(veh) then return nil end
+    Security.MarkServerEntity(veh, row.plate) -- N1/N10: server-side proof of origin, right after the entity exists
     SetVehicleNumberPlateText(veh, row.plate)
     -- payload envelope agreed with Integrations (bridge/vehicle/props.lua): props from DB, fuel/health from DB columns
     local props = MDP.Props.Decode(row.props)

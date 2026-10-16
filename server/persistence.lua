@@ -16,7 +16,9 @@ end
 local function forEachOwnEntity(fn)
     for _, veh in ipairs(GetAllVehicles()) do
         local plate = Entity(veh).state.mdp_plate
-        if plate then fn(veh, Utils.NormalizePlate(plate)) end
+        -- N10: the mdp_plate bag can be forged by the entity owner; require Security's server-side mark too
+        plate = plate and Utils.NormalizePlate(plate)
+        if plate and Security.IsServerEntity(veh, plate) then fn(veh, plate) end
     end
 end
 
@@ -98,7 +100,7 @@ local function onStart()
     --                      state 2 -> unchanged (takeOut safety net spawns it)
     --   c) our tagged entities (mdp_plate) whose row is not 0/2 -> orphan, deleted
     local world = Utils.WorldVehiclesByPlate()
-    local rows = MySQL.query.await('SELECT plate, model, state FROM mdp_vehicles WHERE state IN (?, ?)', { VS.OUT, VS.PARKED_WORLD }) or {}
+    local rows = MySQL.query.await('SELECT plate, model, state, coords FROM mdp_vehicles WHERE state IN (?, ?)', { VS.OUT, VS.PARKED_WORLD }) or {}
     local wanted, dupPlates, adopted, parked, garaged = {}, {}, 0, 0, 0
     local mode = Config.OnRestartOutVehicles or 'park'
     for _, r in ipairs(rows) do
@@ -108,6 +110,25 @@ local function onStart()
         if matches > 1 then
             dupPlates[plate] = true
             print(('^3[mdp_garages] restart: %d world entities match %s (plate+model); none adopted, duplicates left untouched^0'):format(matches, plate))
+        end
+        if ent then
+            -- N1: Security.CanAdopt (server-marked entity, model, empty, within tolerance of DB coords).
+            -- An OUT row's own server entity is adopted even if occupied/moved (driven across the restart);
+            -- anything else that fails: empty -> deleted + logged, occupied -> ignored + logged.
+            local okC, dc = pcall(json.decode, r.coords or '')
+            local dbCoords = (okC and type(dc) == 'table' and tonumber(dc.x)) and vec3(dc.x, dc.y, dc.z) or nil
+            local can, why = Security.CanAdopt(ent, plate, dbCoords, Utils.ModelHash(r.model))
+            if not can and st == VS.OUT and (why == 'occupied' or why == 'moved') and Security.IsServerEntity(ent, plate) then can = true end
+            if not can then
+                if Utils.IsVehicleEmpty(ent) then
+                    print(('^3[mdp_garages] restart: entity for %s not adoptable (%s), deleted^0'):format(plate, tostring(why)))
+                    DeleteEntity(ent)
+                else
+                    print(('^3[mdp_garages] restart: entity for %s not adoptable (%s) and occupied, ignored^0'):format(plate, tostring(why)))
+                    dupPlates[plate] = true -- never treated as orphan
+                end
+                ent = nil
+            end
         end
         if ent then
             wanted[plate] = true

@@ -4,8 +4,8 @@
 --  3 model / coords / heading / props from the DB only
 --  4 spawn in pcall (MDP.Props.SpawnVehicle deletes partial entities); failures retry with exponential backoff
 --  5 TrackSpawn + mdp_plate after DoesEntityExist
---  6 adoption (N1): only an EMPTY entity with the same plate+model, within ParkedMoveTolerance of the DB coords, and
---    created by the server (no first client owner) or already tagged mdp_plate; duplicates: none adopted, logged
+--  6 adoption (N1): only via Security.CanAdopt (server-marked entity, model, empty, within ParkedMoveTolerance of DB coords);
+--    rejected+empty -> deleted, rejected+occupied -> ignored; duplicates: none adopted, logged
 --  7 at most Config.StreamerMaxSpawnsPerTick spawns per tick
 -- Despawn: props snapshot from the network owner (token only to the owner, single use, TTL), then save + delete.
 -- Driver in a parked car: becomes OUT only if the driver is owner/key holder (N4).
@@ -80,16 +80,6 @@ local function fail(plate)
     backoff[plate] = b
 end
 
---- N1: may this untracked world entity be adopted as the parked car?
-local function adoptable(ent, plate, pos)
-    if not Utils.IsVehicleEmpty(ent) then return false end
-    if #(GetEntityCoords(ent) - pos) > (Config.ParkedMoveTolerance or 5.0) then return false end
-    if Entity(ent).state.mdp_plate == plate then return true end
-    -- created by the server: no client ever owned it first (client-created/cloned entities have a first owner)
-    local okF, first = pcall(NetworkGetFirstEntityOwner, ent)
-    return okF and (first == nil or first <= 0)
-end
-
 local function spawnParked(plate)
     Security.WithLock(plate, 0, function()
         if Security.GetSpawnedEntity(plate) then return end
@@ -103,9 +93,16 @@ local function spawnParked(plate)
             fail(plate) return
         end
         if ent then
-            if not adoptable(ent, plate, pos) then
-                print(('^3[mdp_garages] streamer: world entity for %s not adoptable (occupied/moved/client-made), retrying later^0'):format(plate))
-                fail(plate) return
+            -- N1: Security.CanAdopt -> ok | not_server_entity | model_mismatch | occupied | moved
+            local can, why = Security.CanAdopt(ent, plate, pos, Utils.ModelHash(row.model))
+            if not can then
+                if why ~= 'occupied' and Utils.IsVehicleEmpty(ent) then
+                    print(('^3[mdp_garages] streamer: entity for %s not adoptable (%s), deleted^0'):format(plate, tostring(why)))
+                    DeleteEntity(ent)
+                else
+                    print(('^3[mdp_garages] streamer: entity for %s not adoptable (%s) and occupied, ignored^0'):format(plate, tostring(why)))
+                end
+                fail(plate) return -- retry later (spawns fresh once the world is clear)
             end
             Entity(ent).state:set('mdp_plate', plate, true)
             Security.TrackSpawn(plate, NetworkGetNetworkIdFromEntity(ent), nil)
@@ -124,6 +121,7 @@ end
 local function mergeSnapshot(row, snapProps, partial)
     if not partial then return snapProps end
     local base = MDP.Props.Decode(row.props) or {}
+    if base.model == nil then base.model = Utils.ModelHash(row.model) end -- N2b: imported props may lack model
     for k in pairs(Security.PropSnapshotFields or {}) do
         if snapProps[k] ~= nil then base[k] = snapProps[k] end
     end

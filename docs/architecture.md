@@ -381,7 +381,14 @@ Rule: no client→server **event** may change state or money.
 Restart: recovery runs first (R5-3/R6-1); adopted state-2 entities stay tracked. An OUT row with ≥ 2 matching world entities stays OUT.
 
 ### Phase 1 security re-review (ede4002) — streamer/props rules
-- **Adoption (N1):** an untracked world entity with the same plate+model is adopted only if it is empty, within `Config.ParkedMoveTolerance` of the DB coords, and either already tagged `mdp_plate` or server-created (`NetworkGetFirstEntityOwner` has no client). Otherwise no spawn, logged, backoff.
+- **Adoption (N1, re-review 2):** every server spawn calls `Security.MarkServerEntity(ent, plate)` right after the entity exists (non-replicated, secret-tagged; the `mdp_plate` bag alone is forgeable). Adoption uses only `Security.CanAdopt(ent, plate, dbCoords, modelHash)` → `not_server_entity|model_mismatch|occupied|moved`. Streamer: rejected and empty → deleted + logged; occupied → ignored + logged; backoff. Startup: same, except an **OUT** row's own server entity (`IsServerEntity`) is adopted even if `occupied`/`moved` (it was driven across the restart). `forEachOwnEntity` (stop: save coords; start: orphan cleanup) requires `mdp_plate` **and** `Security.IsServerEntity` (N10).
+- **N2b:** when merging a stranger's snapshot over DB props that lack `model` (imported rows), `model` is set from the DB before `SanitizeProps`.
+- **Optional server.cfg hardening:**
+  ```
+  set mdp_garages_entity_secret "<long random string>"   # HMAC secret for Security's server-entity tag (survives restarts)
+  set sv_entityLockdown relaxed                           # or strict: clients can't create networked entities freely
+  set sv_filterRequestControl 2                           # restrict client control requests over server entities
+  ```
 - **Snapshot (N2/N6):** token from `MDP.Props.NewToken()` (string, mixed randoms + timers + counter), sent only to the owner. If the replier is not owner/key holder (`Security.IsOwner(src, plate, true)`), only `Security.PropSnapshotFields` are merged over the DB props before `SanitizeProps`.
 - **Driven parked car (N4):** becomes OUT only if the driver passes `Security.IsOwner(driver, plate, true)`; otherwise the state stays 2 and it is logged (throttled 60 s).
 - **Mileage time base (N5):** stamped on spawn, adoption, becameDriven and park; fallback `UNIX_TIMESTAMP(COALESCE(parked_at, updated_at))` from the DB. Cleared on store/despawn and swept after 24 h (N7). Backoff/log entries are pruned on state change, despawn and on every registry refresh; pending snapshots of a dropped owner end immediately.
@@ -392,5 +399,5 @@ Restart: recovery runs first (R5-3/R6-1); adopted state-2 entities stay tracked.
 
 ### NUI additions (Frontend f6f2495)
 - **`open` message** also carries `lang` (= `Config.Locale`, e.g. `'en'`/`'es'`; the NUI uses it for number/date formatting) besides `locale`. `data` may come **without `vehicles`**: the NUI then calls the `getVehicles` callback itself.
-- **`toast` action** (works without NUI focus, panel may be closed): `SendNUIMessage({action='toast', id, kind, titleKey?, title?, description?, error?, locale, lang})`. Lua export **`exports.mdp_garages:GarageToast(t)`** with `t = { id?: string, kind: 'loading'|'success'|'error', titleKey?: string (ui locale key, translated by the NUI), title?: string (already translated), description?: string, error?: string (contract error code, normalized with Utils.ErrorCode) }`. The same `id` replaces the previous toast (loading → result). Used by `client/zones.lua` for store/park feedback (`storing`, `parking`, `taken_out`, …).
+- **`toast` action** (works without NUI focus, panel may be closed): `SendNUIMessage({action='toast', id, kind, titleKey?, title?, description?, error?, locale, lang})`. Lua export **`exports.mdp_garages:GarageToast(t)`** with `t = { id?: string, kind: 'loading'|'success'|'error', titleKey?: string (ui locale key, translated by the NUI), title?: string (already translated), description?: string, error?: string (contract error code, normalized with Utils.ErrorCode) }`. The same `id` replaces the previous toast (loading → result). Used by `client/zones.lua` for store/park feedback: loading toasts with ui keys `storing` / `parking`, results with `_L('vehicle_stored')` / `_L('vehicle_parked')`. `taken_out` is shown by the NUI itself after a successful `takeOut`.
 - **Health display:** the server stores engine -4000..1000 (`Security.ClampHealth`); the NUI clamps engine/body to 0..1000 before showing percentages.

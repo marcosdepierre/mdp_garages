@@ -113,3 +113,11 @@ Garages accept the vehicle types listed in their `types` (automobile, bike, boat
 
 ## Restart behaviour
 On start, vehicles left OUT are reconciled with the world. If an entity with the plate and model still exists, it's adopted (parked where it is with `'park'`, or garaged with `'garage'`); otherwise the vehicle goes to `Config.DefaultGarage`. Nothing depends on memory from a previous run. When a player disconnects while driving one of our vehicles, `Config.OnDisconnect` applies.
+
+## Optional server.cfg hardening
+```
+set mdp_garages_entity_secret "<long random string>"   # secret for the server-entity tag used to adopt vehicles after restarts
+set sv_entityLockdown relaxed                           # or strict
+set sv_filterRequestControl 2
+```
+See docs/architecture.md (Phase 1 security re-review) and docs/security.md.
