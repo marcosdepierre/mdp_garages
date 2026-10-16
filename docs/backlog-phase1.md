@@ -25,7 +25,7 @@
 | TR-3 (fase 2) | Pendiente | DELETE de llaves y UPDATE de dueño en una sola transacción (hoy el error del DELETE se registra en el log). |
 | P1-OWN-M1 RECUPERAR (fase 2) | Pendiente | Diseño de Security: comando/acción de recuperar para coche OUT; requiere fila OUT + dueño + `IsOwner(src, plate, false)`; escaneo del pool por matrícula; borrar copias sin marca vacías o rechazar si alguna está ocupada; cobrar tarifa; spawn nuevo marcado con props de la BD; log AUDIT; cooldown por matrícula. |
 | R7-3 (fase 2) | Pendiente | `AddVehicle` con el lock de la matrícula ocupado debe devolver `busy`, no `transfer_failed`. |
-| AD-1 (fase 2) | Pendiente | `Config.AllowFirstStoreAdoption` vale `true` por defecto (decisión de Senior); Security recomienda `false` antes del release (re-revisión 5, rebajado a Bajo). Revisar el valor por defecto en fase 2. |
+| AD-1 | Decidido | `Config.AllowFirstStoreAdoption` se queda en `true` por defecto (Security lo acepta como riesgo Bajo con las mitigaciones fijas). Documentado en README (Dealerships): con `SpawnOwnedVehicle` + `Config.TrustedResources` se puede poner a `false`. |
 | TR-4 (fase 2) | Parcial | Varias filas del framework para una matrícula: hoy se omite el chequeo y no se transfiere (log). Falta una herramienta de admin para resolverlo. |
 | R2-M2 (fase 2) | Pendiente | Diferido por Senior a fase 2 (ver docs/qa-review-phase1-backend.md). |
 | R2-L1 (Baja) | Pendiente | `FrameworkOwner`: una matrícula del framework con doble espacio interno no coincide con la normalizada (búsqueda indexada exacta). |
