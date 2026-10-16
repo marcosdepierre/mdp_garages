@@ -48,13 +48,13 @@ Dependencies: **oxmysql** and **ox_lib** (hard; `@ox_lib/init.lua` is a shared s
 Tables are prefixed `mdp_` so they don't clash with ESX `owned_vehicles` / QB `player_vehicles`. All use InnoDB and utf8mb4.
 | Table | Purpose | Key indexes / FKs |
 |---|---|---|
-| `mdp_vehicles` | one row per owned vehicle: props, coords JSON, heading, `state` TINYINT, fuel, engine, body, mileage, garage_id | UNIQUE plate; owner, state, garage_id |
+| `mdp_vehicles` | one row per owned vehicle: props, coords JSON, heading, `state` TINYINT, `vtype` (v2), fuel, engine, body, mileage, garage_id | UNIQUE plate; owner, state, garage_id |
 | `mdp_vehicle_keys` | shared keys | UNIQUE(plate, holder); holder; FK plate CASCADE |
 | `mdp_private_garages` | purchased garages with interior; `config_id` = property key from server config | owner; UNIQUE(owner, config_id) stops a double click from buying twice; UNIQUE(owner, label) |
 | `mdp_impound` | impound records (fee, release_after, location, released) | plate, released; FK plate CASCADE |
 | `mdp_fines` | fines; `channel` ENUM internal/invoice/external/needs_review, `paid` 0/1/2/3 (unpaid/paid/claiming/voided) | plate, owner, paid; FK plate CASCADE |
 | `mdp_fine_invoices` | billing invoice → fine mapping (`provider`, `invoice_id`, `fine_id`), written by `BillingCommon.Link` and read by `BillingCommon.OnPaid` (bridge/billing/_common.lua, which also creates it at runtime) | PK(provider, invoice_id); fine_id `INT UNSIGNED` FK → `mdp_fines(id)` ON DELETE CASCADE |
-| `mdp_schema_version` | applied schema versions (currently 1); future phases add idempotent ALTERs keyed by version. The server warns at start if the version is lower than `Constants.SchemaVersion` | PK(version) |
+| `mdp_schema_version` | applied schema versions (currently **2**: v2 adds `mdp_vehicles.vtype`; `server/persistence.lua` checks `information_schema` at start and ALTERs only if the column is missing; manual alternative `sql/upgrade_v2.sql`); future phases add idempotent ALTERs keyed by version. The server warns at start if the version is lower than `Constants.SchemaVersion` | PK(version) |
 
 `state` constants (`shared/constants.lua`): `Constants.VehicleState`: `0=OUT, 1=GARAGED, 2=PARKED_WORLD, 3=IMPOUNDED, 4=RETIRED`.
 
@@ -92,7 +92,26 @@ Nothing depends on memory from a previous run. On start (`MySQL.ready`):
 2. Atomic SQL: with `Config.OnRestartOutVehicles = 'park'`, `UPDATE … SET state=2, parked_at=NOW() WHERE state=0 AND coords IS NOT NULL`. Then, in both modes, `UPDATE … SET state=1, garage_id=Config.DefaultGarage WHERE state=0`.
 3. The spawn registry (`Security.TrackSpawn`) and plate locks start empty. World-parked cars (state 2) are respawned by the proximity spawner from the DB.
 4. The schema version is checked.
-On `onResourceStop`, positions of live vehicles are saved (they stay OUT, and the next start converts them). A disconnecting player's car stays in the world as OUT until the next restart (phase 1 may add `Config.OnDisconnect`).
+On `onResourceStop`, positions of live vehicles are saved (they stay OUT, and the next start converts them). Disconnects are handled by `Config.OnDisconnect` (see below).
+
+## Vehicle types
+`mdp_vehicles.vtype` is one of `automobile|bike|boat|heli|plane` (`Constants.VehicleTypes`) and is passed to `CreateVehicleServerSetter` on `takeOut`.
+- **Resolution on store**, in priority order:
+  1. `Config.VehicleTypes[model]` override.
+  2. The server-side native `GetVehicleType(entity)`, mapped (quadbike and amphibious → automobile, submarine → boat, blimp → heli).
+  3. The client's optional class hint `vclass` (from `GetVehicleClass`): 8 or 13 → bike, 14 → boat, 15 → heli, 16 → plane, anything else → automobile.
+  4. `automobile`.
+  The server validates the result against the whitelist.
+- **Garages** declare `types = {'automobile', ...}` (missing = automobile only). `takeOut` and `storeVehicle` refuse a mismatch with `wrong_vehicle_type` (locale `err_wrong_vehicle_type`). `getVehicles` omits garaged vehicles whose type the garage can't hold, while still listing out/parked/impounded ones for status. Each `Vehicle` carries a `vtype` field.
+- Migration and sync: ESX `type` boat/airplane/helicopter map to boat/plane/heli; QB rows default to automobile; `Config.VehicleTypes` overrides apply.
+
+## Disconnect policy (`Config.OnDisconnect`)
+On `playerDropped`, the policy applies only if the player was **driving** (seat -1) one of our tracked vehicles (state bag `mdp_plate` plus `Security.GetSpawnedEntity`). Everything runs inside `Security.WithLock(plate, src, fn)` with atomic `UPDATE … WHERE plate=? AND state=0`.
+| value | effect |
+|---|---|
+| `keep` (default) | state 2 at the vehicle's position, `parked_at=NOW()`; coords, heading and health (server natives) saved; the entity stays |
+| `garage` | state 1 in `Config.DefaultGarage`, health saved, entity deleted and untracked |
+| `impound` | state 3 in `Config.DefaultImpound`, plus an `mdp_impound` row using `Config.ImpoundReasons[Config.DisconnectImpoundReason]` (fee and hours computed server-side), entity deleted |
 
 ## Garages and zones
 Public, impound and private garage entrances are **ox_lib zones** (`lib.zones.sphere`/`box`) created client-side from shared config. Entering a zone shows a `lib.showTextUI` prompt, and the interaction opens the NUI. The server never trusts the zone: it re-checks distance against server config coords (10 m).
@@ -146,7 +165,7 @@ It's off by default. It runs when `Config.Migration.Enabled = true` (once at sta
 - ESX `type`: only types listed in `Config.Migration.VehicleTypes` are imported (cars by default).
 - ESX `job`: non-empty rows (other than `civ`) are skipped when `SkipJobVehicles` is set.
 - ESX `stored=0` maps to `Config.Migration.NotStored` (`garaged` or `impounded`).
-- ESX `parking` and QB `garage` go through `Utils.ResolveGarageId`.
+- ESX `parking` is first mapped through `Config.ESXParkingMap[value]` (falling back to `public:<value>`), then goes through `Utils.ResolveGarageId`. QB `garage` goes through `Utils.ResolveGarageId` as `public:<garage>`. The same rules apply to sync on player load.
 - QB `state=2` maps to IMPOUNDED.
 - Skipped rows are counted by reason (`invalid_plate`, `type`, `job`, `no_owner`) and reported in the console.
 
@@ -171,6 +190,7 @@ Garage = {
   id: string            -- 'public:<id>' | 'private:<id>' | 'impound:<id>'
   kind: string          -- 'public' | 'private' | 'impound'
   label: string
+  types?: string[]      -- accepted vehicle types (server config)
   slots?: number        -- private garages only
   used?: number         -- private garages only
   fee?: number          -- impound only; display only, server recomputes
@@ -186,6 +206,7 @@ Vehicle = {
   body: number          -- 0-1000
   mileage: number       -- in Config.MileageUnit
   mileage_unit: string  -- 'km' | 'mi'
+  vtype: string         -- 'automobile' | 'bike' | 'boat' | 'heli' | 'plane'
   garage_id: string|null
   is_owner: boolean     -- false = key holder
   coords?: { x: number, y: number, z: number }  -- only if owner, or key holder with Config.KeyHoldersSeeLocation
@@ -204,7 +225,7 @@ Vehicle = {
 | `getVehicles` | `{ garage_id: string }` | `Vehicle[]` | validates `Utils.IsValidGarageId`, proxies `lib.callback.await('mdp_garages:getVehicles')` |
 | `takeOut` | `{ plate: string, garage_id: string }` | `{ netId: number }` | normalizes and validates the plate and garage_id, proxies `mdp_garages:takeOut`, closes the UI on success |
 
-Error strings: `invalid_request`, `invalid_garage`, `wrong_garage_kind`, `unknown_garage`, `wrong_garage`, `server_error`, `rejected`, `not_found`, `not_owner`, `too_far`, `rate_limited`, `locked`, `already_out`, `retired`, `no_spawn`, `spawn_failed`, `unpaid_fines`, `insufficient_funds`, `world_limit`, `external_invoice`. Security rejections reach the client as `false, reason`; `client/main.lua` converts them to `{ok=false, error=reason}`. Prices and fees are never accepted from the NUI; the server computes them from config/DB.
+Error strings: `invalid_request`, `invalid_garage`, `wrong_garage_kind`, `unknown_garage`, `wrong_garage`, `server_error`, `rejected`, `not_found`, `not_owner`, `too_far`, `rate_limited`, `locked`, `already_out`, `retired`, `wrong_vehicle_type`, `invalid_state`, `no_spawn`, `spawn_failed`, `unpaid_fines`, `insufficient_funds`, `world_limit`, `external_invoice`. Security rejections reach the client as `false, reason`; `client/main.lua` converts them to `{ok=false, error=reason}`. Prices and fees are never accepted from the NUI; the server computes them from config/DB.
 
 ## Events and callbacks (planned)
 All request/response endpoints use **ox_lib `lib.callback`** only (there is no event fallback) and are registered through `Security.RegisterSecureCallback`. Validation codes:
@@ -221,7 +242,7 @@ All request/response endpoints use **ox_lib `lib.callback`** only (there is no e
 |---|---|---|---|---|---|
 | `mdp_garages:getVehicles` | lib.callback | C→S | NUI `getVehicles` | `{garage_id}` | RATE(5/10s), schema `garage_id=V.isGarageId`, GAR(`{public,private}`), DIST(garage 10 m); returns only vehicles the player owns or holds keys for, coords filtered by the visibility rule |
 | `mdp_garages:takeOut` | lib.callback | C→S | NUI `takeOut` | `{plate, garage_id}` | schema (`plate`, `V.isGarageId`), RATE(1/s), GAR(`{public,private}`), DIST(garage), `requireOwnership` (owner or key holder), fines threshold if enabled; inside `WithLock(plate, src, fn)`: `GetSpawnedEntity(plate)` must be nil, ATOM(1→0), `CreateVehicleServerSetter` at a `GetGarage().spawns` point, `TrackSpawn` |
-| `mdp_garages:storeVehicle` | lib.callback | C→S | player in a garage zone | `{netId, garage_id, props}` | RATE(1/s), GAR(`{public,private}`), DIST(garage 10 m + vehicle 5 m). The server resolves `NetworkGetEntityFromNetworkId(netId)`, checks the entity exists and is a vehicle, reads the plate **server-side** with `Utils.NormalizePlate(GetVehicleNumberPlateText(ent))` (no client plate is accepted; schema has no `plate` field), then calls `Security.IsOwner(src, plate)` manually. Inside `WithLock(plate, src, fn)`: ATOM(0→1), props size cap + model match against DB, `UntrackSpawn`, delete entity, slot limit for private garages |
+| `mdp_garages:storeVehicle` | lib.callback | C→S | player in a garage zone | `{netId, garage_id, vclass?}` | **Implemented** (`server/garages.lua`). RATE(1/s), schema, GAR(`{public,private}`), DIST(garage 10 m + vehicle 5 m). Entity from `NetworkGetEntityFromNetworkId`, must be a vehicle; plate read server-side (`Utils.NormalizePlate(GetVehicleNumberPlateText)`), then `Security.IsOwner` called manually; model must match the DB; vtype resolved and checked against `garage.types`. Inside `WithLock(plate, src, fn)`: `UPDATE … WHERE state IN (0,2)` (affectedRows == 1) saving vtype and server-read health, `UntrackSpawn`, delete entity |
 | `mdp_garages:parkWorld` | lib.callback | C→S | player parks on the street | `{netId}` | RATE(1/s), DIST(vehicle 5 m), plate read server-side, OWN, world limits (refused with `world_limit` + notify), `WithLock(plate, src, fn)`, ATOM(0→2), sets `parked_at`, coords/heading read from the server entity |
 | `mdp_garages:client:applyProps` | event | S→C | server after spawning a persistent car | `{netId, props}` | server-originated; client only applies props |
 | `mdp_garages:syncWear` | lib.callback | C→S | client every N min while driving / on exit | `{netId, mileageDelta}` | RATE, src is the driver, plate read server-side, OWN/key, delta clamped by max plausible speed × time. **Health is read server-side** (`GetVehicleEngineHealth`/`GetVehicleBodyHealth` on the server entity), never from the client; fuel via `Bridge.Fuel` |
@@ -242,7 +263,5 @@ Rule: no client→server **event** may change state or money.
 
 ## Open questions
 1. The example garage and impound coords are approximate and need checking in-game.
-2. Private garage definitions: the property/interior config shape (`config_id`, price, slots) and the server-side `Utils.PrivateGarageLookup` arrive in the private-garages phase.
-3. `takeOut` spawns with vehicle type `'automobile'`. Bikes, boats and aircraft need a per-model type (model metadata or a client-side lookup).
-4. Disconnect policy: keep the car in the world (current behaviour), or add `Config.OnDisconnect = 'keep'|'garage'|'impound'`?
-5. ESX `parking` column values are mapped to `public:<value>`, and unknown ones fall back to `Config.DefaultGarage`. Should there be an explicit mapping table in config?
+2. The private-garage config shape and the server-side `Utils.PrivateGarageLookup` are still to be designed.
+3. Props are not yet saved on store or applied on spawn (state bag `mdp_props` is set; the client applier comes in phase 1).

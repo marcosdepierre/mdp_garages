@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS `mdp_vehicles` (
   `plate`       VARCHAR(12)  NOT NULL,
   `owner`       VARCHAR(64)  NOT NULL,
   `model`       VARCHAR(64)  NOT NULL,
+  `vtype`       VARCHAR(16)  NOT NULL DEFAULT 'automobile' COMMENT 'automobile|bike|boat|heli|plane (CreateVehicleServerSetter type)',
   `props`       LONGTEXT     NULL COMMENT 'JSON vehicle properties',
   `coords`      LONGTEXT     NULL COMMENT 'JSON {x,y,z} last world position',
   `heading`     FLOAT        NOT NULL DEFAULT 0,
@@ -116,4 +117,6 @@ CREATE TABLE IF NOT EXISTS `mdp_schema_version` (
   PRIMARY KEY (`version`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-INSERT IGNORE INTO `mdp_schema_version` (`version`) VALUES (1);
+INSERT IGNORE INTO `mdp_schema_version` (`version`) VALUES (1), (2);
+-- v2: mdp_vehicles.vtype. Existing v1 installs are upgraded automatically on resource start
+-- (server/persistence.lua) or manually with sql/upgrade_v2.sql.

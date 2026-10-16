@@ -21,5 +21,8 @@ Constants.FineStatus = {
 -- mdp_fines.channel
 Constants.FineChannel = { INTERNAL = 'internal', INVOICE = 'invoice', NEEDS_REVIEW = 'needs_review', EXTERNAL = 'external' }
 
+-- Vehicle types accepted by CreateVehicleServerSetter that garages handle
+Constants.VehicleTypes = { automobile = true, bike = true, boat = true, heli = true, plane = true }
+
 -- Schema version expected by this code (mdp_schema_version)
-Constants.SchemaVersion = 1
+Constants.SchemaVersion = 2

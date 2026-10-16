@@ -19,6 +19,7 @@ Locales.en = {
     err_already_out = 'This vehicle is already out',
     err_no_spawn = 'No free spawn point',
     vehicle_out = 'Vehicle %s is ready',
+    err_wrong_vehicle_type = 'This garage does not accept this type of vehicle',
     -- UI strings sent to the NUI in the 'open' message (locale field)
     ui = {
         title = 'Garage',

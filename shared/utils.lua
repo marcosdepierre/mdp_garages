@@ -68,3 +68,23 @@ function Utils.GetGarage(id, expectedKind)
     if not g then return nil, 'unknown_garage' end
     return g, nil
 end
+
+--- Vehicle type helpers (automobile|bike|boat|heli|plane).
+function Utils.IsValidVehicleType(t) return type(t) == 'string' and Constants.VehicleTypes[t] == true end
+
+--- GTA vehicle class -> type: 8,13 bike; 14 boat; 15 heli; 16 plane; else automobile.
+function Utils.VehicleTypeFromClass(class)
+    class = tonumber(class)
+    if class == 8 or class == 13 then return 'bike' end
+    if class == 14 then return 'boat' end
+    if class == 15 then return 'heli' end
+    if class == 16 then return 'plane' end
+    return 'automobile'
+end
+
+--- Does the garage accept this vehicle type? garage.types = { 'automobile', ... }; missing = automobile only.
+function Utils.GarageAllowsType(garage, vtype)
+    local types = garage and garage.types or { 'automobile' }
+    for _, t in ipairs(types) do if t == vtype then return true end end
+    return false
+end

@@ -14,7 +14,7 @@ A standalone garage resource for **Qbox (qbx_core)**, **QBCore (qb-core)** and *
 
 ## Installation
 1. Copy `mdp_garages` to your `resources` folder. The NUI is prebuilt in `web/dist`. To rebuild it, run `cd web && npm ci && npm run build`.
-2. **Run `sql/install.sql`** on your database (HeidiSQL or the `mysql` CLI). It isn't applied automatically, and it's safe to re-run.
+2. **Run `sql/install.sql`** on your database (HeidiSQL or the `mysql` CLI). It isn't applied automatically, and it's safe to re-run. Upgrading from schema v1: the resource adds `mdp_vehicles.vtype` on start, or you can run `sql/upgrade_v2.sql`.
 3. `server.cfg`. Start order matters:
    ```cfg
    ensure oxmysql
@@ -22,6 +22,10 @@ A standalone garage resource for **Qbox (qbx_core)**, **QBCore (qb-core)** and *
    ensure qbx_core        # or qb-core / es_extended
    # ensure fuel/keys/billing resources here
    ensure mdp_garages
+
+   # permissions
+   add_ace group.admin mdp_garages.admin allow     # /mdp_finereview <id> paid|void (server/fine_review.lua)
+   add_ace group.admin command.mdp_migrate allow   # mdp_migrate in-game (always allowed from the console)
    ```
 4. Optional: migrate existing vehicles (below).
 
@@ -47,7 +51,8 @@ local ok, err = exports.mdp_garages:AddVehicle(owner, plate, model, props, garag
 ## Commands
 | Command | Who | Description |
 |---|---|---|
-| `mdp_migrate` | console, or ace `command.mdp_migrate` | import from the framework vehicle table |
+| `mdp_migrate` | console, or ace `command.mdp_migrate` (`add_ace group.admin command.mdp_migrate allow`) | import from the framework vehicle table |
+| `/mdp_finereview <id> paid\|void` | ace `mdp_garages.admin` | resolve `needs_review` fines (Integrations) |
 | `/mdp_payfine <id>` | players | pay a fine from the bank. Refused if the fine was sent as an invoice through a billing resource |
 
 ## Configuration (`shared/config.lua`)
@@ -68,6 +73,10 @@ Every key is commented in the file as description · values · default. Summary:
 | `SyncFrameworkTables` | `true` | import missing plates on player load |
 | `Migration` | see file | `Enabled`, `Ace`, `VehicleTypes`, `SkipJobVehicles`, `NotStored`, `BatchSize` |
 | `OnRestartOutVehicles` | `'park'` | `park` (to last coords) or `garage` (to DefaultGarage) |
+| `OnDisconnect` | `'keep'` | driver disconnects: `keep` (parked in place), `garage` (DefaultGarage), `impound` |
+| `DisconnectImpoundReason` / `DefaultImpound` | `'abandoned'` / `'impound:lspd'` | used by OnDisconnect = impound |
+| `ESXParkingMap` | examples | ESX `parking` value → garage id (migration/sync) |
+| `VehicleTypes` | `{}` | per-model type override (`automobile/bike/boat/heli/plane`) |
 | `MaxWorldParkedPerPlayer` / `MaxWorldParkedServer` | `5` / `150` | parking is refused at the limit |
 | `AutoImpoundOldest` | `false` | impound the oldest car at the global limit instead |
 | `WorldSpawnRadius` / `DespawnMargin` | `150.0` / `50.0` | proximity spawn with hysteresis |
@@ -77,7 +86,7 @@ Every key is commented in the file as description · values · default. Summary:
 | `ImpoundReasons` | 3 examples | reasonId → fee/hours (server-side only) |
 | `MileageUnit` | `'km'` | `km` / `mi` |
 | `KeyHoldersSeeLocation` | `true` | owners always see location |
-| `DefaultGarage` / `Garages` | `public:legion` / legion, pillbox, sandy, impound:lspd | garage definitions |
+| `DefaultGarage` / `Garages` | `public:legion` / legion, pillbox, sandy, impound:lspd | garage definitions: `label`, `coords`, `radius`, `spawns`, `types` |
 
 ## Framework notes
 - **Qbox:** detected before qb-core, because Qbox also provides the qb-core compatibility layer. Uses `exports.qbx_core` (citizenid, `GetMoney`/`RemoveMoney`, `Notify`).
@@ -86,5 +95,8 @@ Every key is commented in the file as description · values · default. Summary:
 - **Standalone:** prints a red warning. Identifiers come from the FiveM license, and all money removal fails.
 - Plates are 1-8 characters `[A-Z0-9 ]` after trimming, collapsing spaces and uppercasing. The DB column is `VARCHAR(12)`.
 
+## Vehicle types
+Garages accept the vehicle types listed in their `types` (automobile, bike, boat, heli, plane). The type is detected on store (config override, then the server native, then the client class) and is used when the vehicle is spawned.
+
 ## Restart behaviour
-On start, vehicles left OUT are converted atomically (parked at their last coords, or sent to the default garage), and leftover entities are cleaned up. Nothing depends on memory from a previous run.
+On start, vehicles left OUT are converted atomically (parked at their last coords, or sent to the default garage), and leftover entities are cleaned up. Nothing depends on memory from a previous run. When a player disconnects while driving one of our vehicles, `Config.OnDisconnect` applies.

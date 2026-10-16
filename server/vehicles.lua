@@ -43,14 +43,19 @@ function Vehicles.MapFrameworkRow(framework, r)
         if mig.SkipJobVehicles ~= false and r.job ~= nil and r.job ~= '' and r.job ~= 'civ' then return nil, 'job' end
         local state = VS.GARAGED
         if r.stored ~= nil and tonumber(r.stored) == 0 and mig.NotStored == 'impounded' then state = VS.IMPOUNDED end
-        local gid = Utils.ResolveGarageId(r.parking and r.parking ~= '' and ('public:' .. tostring(r.parking)) or nil, plate)
+        local gid
+        if r.parking and r.parking ~= '' then
+            gid = (Config.ESXParkingMap or {})[tostring(r.parking)] or ('public:' .. tostring(r.parking))
+        end
+        gid = Utils.ResolveGarageId(gid, plate)
         if state == VS.IMPOUNDED then gid = nil end
         return { plate = plate, owner = r.owner, model = modelFromProps(r.vehicle) or 'unknown', props = r.vehicle,
+                 vtype = (r.type == 'boat' and 'boat') or ((r.type == 'airplane' or r.type == 'plane') and 'plane') or (r.type == 'helicopter' and 'heli') or 'automobile',
                  state = state, garage_id = gid, fuel = 100, engine = 1000, body = 1000 }
     else
         local state = (tonumber(r.state) == 2) and VS.IMPOUNDED or VS.GARAGED
         local gid = state == VS.GARAGED and Utils.ResolveGarageId(r.garage and ('public:' .. tostring(r.garage)) or nil, plate) or nil
-        return { plate = plate, owner = r.citizenid, model = tostring(r.vehicle or 'unknown'), props = r.mods,
+        return { plate = plate, owner = r.citizenid, model = tostring(r.vehicle or 'unknown'), props = r.mods, vtype = 'automobile',
                  state = state, garage_id = gid, fuel = tonumber(r.fuel) or 100,
                  engine = tonumber(r.engine) or 1000, body = tonumber(r.body) or 1000 }
     end
@@ -63,13 +68,15 @@ function Vehicles.InsertBatch(rows)
         local ph, params = {}, {}
         for j = i, math.min(i + size - 1, #rows) do
             local r = rows[j]
-            ph[#ph + 1] = '(?, ?, ?, ?, ?, ?, ?, ?, ?)'
-            for _, v in ipairs({ r.plate, r.owner, r.model, r.props, r.state, r.garage_id, r.fuel, r.engine, r.body }) do
-                params[#params + 1] = v
-            end
+            ph[#ph + 1] = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            -- explicit indices: props/garage_id may be nil (ipairs would stop early)
+            local vals = { r.plate, r.owner, r.model, (Config.VehicleTypes or {})[r.model] or r.vtype or 'automobile',
+                           r.props, r.state, r.garage_id, r.fuel, r.engine, r.body }
+            local base = #params
+            for n = 1, 10 do params[base + n] = vals[n] end
         end
         local affected = MySQL.update.await(
-            'INSERT IGNORE INTO mdp_vehicles (plate, owner, model, props, state, garage_id, fuel, engine, body) VALUES '
+            'INSERT IGNORE INTO mdp_vehicles (plate, owner, model, vtype, props, state, garage_id, fuel, engine, body) VALUES '
             .. table.concat(ph, ', '), params)
         inserted = inserted + (affected or 0)
     end
@@ -125,9 +132,10 @@ function Vehicles.AddVehicle(owner, plate, model, props, garageId)
         if #propsJson > 65535 then return false, 'invalid_props' end
     end
     garageId = Utils.ResolveGarageId(garageId or Config.DefaultGarage, plate)
+    local vtype = (Config.VehicleTypes or {})[model] or 'automobile'
     local ok, affected = pcall(MySQL.update.await,
-        'INSERT IGNORE INTO mdp_vehicles (plate, owner, model, props, state, garage_id) VALUES (?, ?, ?, ?, ?, ?)',
-        { plate, owner, model, propsJson, VS.GARAGED, garageId })
+        'INSERT IGNORE INTO mdp_vehicles (plate, owner, model, vtype, props, state, garage_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        { plate, owner, model, vtype, propsJson, VS.GARAGED, garageId })
     if not ok then return false, 'db_error' end
     if affected ~= 1 then return false, 'plate_exists' end
     return true

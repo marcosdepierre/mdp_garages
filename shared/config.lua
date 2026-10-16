@@ -64,6 +64,14 @@ Config.Migration = {
     NotStored = 'garaged',
     BatchSize = 500, -- rows per multi-row INSERT · integer · 500
 }
+-- ESX `parking` column value -> mdp garage id, applied by migrate/sync BEFORE Utils.ResolveGarageId.
+-- Unmapped values become 'public:<value>' and fall back to DefaultGarage if unknown · table · examples below
+Config.ESXParkingMap = {
+    ['SanAndreasAvenue'] = 'public:legion',
+    ['LegionSquare']     = 'public:legion',
+    ['PillboxHill']      = 'public:pillbox',
+    ['SandyShores']      = 'public:sandy',
+}
 
 ---------------------------------------------------------------------------
 -- Restart / persistence
@@ -71,6 +79,13 @@ Config.Migration = {
 -- What happens to vehicles still OUT (state 0) when the resource starts
 -- · 'park' (-> 2 at last known coords; no coords -> garage) | 'garage' (-> 1 in DefaultGarage) · 'park'
 Config.OnRestartOutVehicles = 'park'
+-- What happens to a tracked vehicle the player was DRIVING when they disconnect
+-- · 'keep' (state 2 at its position, parked_at=NOW, coords/heading/health saved) | 'garage' (state 1 in DefaultGarage,
+--   entity deleted) | 'impound' (state 3, DisconnectImpoundReason, entity deleted) · 'keep'
+Config.OnDisconnect = 'keep'
+-- Impound reason id (Config.ImpoundReasons) and lot used by OnDisconnect = 'impound' · string · 'abandoned' / 'impound:lspd'
+Config.DisconnectImpoundReason = 'abandoned'
+Config.DefaultImpound = 'impound:lspd'
 -- Max world-parked vehicles per player; at the limit parking is refused · integer · 5
 Config.MaxWorldParkedPerPlayer = 5
 -- Max world-parked vehicles on the server; at the limit parking is refused (see AutoImpoundOldest) · integer · 150
@@ -107,6 +122,11 @@ Config.ImpoundReasons = {
 ---------------------------------------------------------------------------
 -- Wear / UI
 ---------------------------------------------------------------------------
+-- Per-model vehicle type override (wins over GetVehicleType / client class) · { [model] = type } · {}
+-- types: 'automobile' | 'bike' | 'boat' | 'heli' | 'plane'
+Config.VehicleTypes = {
+    -- seashark = 'boat',
+}
 -- Mileage display unit (DB always stores km) · 'km' | 'mi' · 'km'
 Config.MileageUnit = 'km'
 -- Key holders also receive vehicle coords (owner always does) · boolean · true
@@ -118,12 +138,14 @@ Config.KeyHoldersSeeLocation = true
 --   coords: interaction point (vec3) · DIST checks use this
 --   radius: ox_lib zone radius (m) · number · 3.0
 --   spawns: vec4(x, y, z, heading) spawn points, first free one is used
+--   types: vehicle types accepted · { 'automobile' | 'bike' | 'boat' | 'heli' | 'plane', ... } · { 'automobile' }
 ---------------------------------------------------------------------------
 -- Fallback garage for migration, sync and unknown garage ids · garage id · 'public:legion'
 Config.DefaultGarage = 'public:legion'
 Config.Garages = {
     ['public:legion'] = {
         label = 'Legion Square Parking',
+        types = { 'automobile', 'bike' },
         coords = vec3(215.8, -810.1, 30.7),
         radius = 3.0,
         spawns = {
@@ -134,6 +156,7 @@ Config.Garages = {
     },
     ['public:pillbox'] = {
         label = 'Pillbox Hill Parking',
+        types = { 'automobile', 'bike' },
         coords = vec3(273.8, -344.2, 44.9),
         radius = 3.0,
         spawns = {
@@ -144,6 +167,7 @@ Config.Garages = {
     },
     ['public:sandy'] = {
         label = 'Sandy Shores Parking',
+        types = { 'automobile', 'bike' },
         coords = vec3(1737.6, 3710.2, 34.1),
         radius = 3.0,
         spawns = {
@@ -153,6 +177,7 @@ Config.Garages = {
     },
     ['impound:lspd'] = {
         label = 'LSPD Impound Lot',
+        types = { 'automobile', 'bike', 'boat', 'heli', 'plane' },
         coords = vec3(409.3, -1623.0, 29.3),
         radius = 3.0,
         spawns = { vec4(401.9, -1631.6, 29.3, 230.0), vec4(404.4, -1634.0, 29.3, 230.0) },

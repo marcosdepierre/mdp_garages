@@ -19,6 +19,7 @@ Locales.es = {
     err_already_out = 'Este vehículo ya está fuera',
     err_no_spawn = 'No hay ningún punto de aparición libre',
     vehicle_out = 'El vehículo %s está listo',
+    err_wrong_vehicle_type = 'Este garaje no admite este tipo de vehículo',
     -- UI strings sent to the NUI in the 'open' message (locale field)
     ui = {
         title = 'Garaje',
