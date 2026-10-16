@@ -33,7 +33,7 @@ A standalone garage resource for **Qbox (qbx_core)**, **QBCore (qb-core)** and *
 Tables are prefixed `mdp_` so they don't clash with ESX `owned_vehicles` or QB `player_vehicles`: `mdp_vehicles`, `mdp_vehicle_keys`, `mdp_private_garages`, `mdp_impound`, `mdp_fines`, `mdp_fine_invoices`, `mdp_schema_version`. **`mdp_vehicles` is the source of truth.** Framework tables are only read.
 
 ## Migration and sync
-- **Automatic sync** (`Config.SyncFrameworkTables = true`): runs on player load, on resource start for connected players, when the garage is opened (60 s cache) and from `AddVehicle`. Missing plates are imported and owner changes propagate (the previous owner's keys are revoked). With `Config.SyncRemovals`, vehicles that were imported from the framework (`source='framework'`) and later deleted there are removed from `mdp_vehicles` too. Vehicles added with `AddVehicle` (`source='mdp'`) and rows that existed before schema v3 are never removed.
+- **Automatic sync** (`Config.SyncFrameworkTables = true`): runs on player load, on resource start for connected players, when the garage is opened (60 s cache) and from `AddVehicle`. Missing plates are imported and owner changes propagate (the previous owner's keys are revoked). With `Config.SyncRemovals`, vehicles that were imported from the framework (`source='framework'`) and later deleted there are **soft-deleted** (state 5 REMOVED; fines and history are kept, and the vehicle is restored if it reappears). Vehicles added with `AddVehicle` (`source='mdp'`) and rows that existed before schema v3 are never removed.
 - **One-off migration:** set `Config.Migration.Enabled = true` (it runs once at start) or run `mdp_migrate` in the console. It imports only the detected framework's table, in batches, with `INSERT IGNORE`. ESX `type`, `job` and `stored` are respected (see `Config.Migration`).
 - **Dealerships** can call the export directly (below).
 
@@ -81,7 +81,7 @@ Every key is commented in the file as description · values · default. Summary:
 | `PlateMaxLength` | `8` | plate rule 1-8 `[A-Z0-9 ]` |
 | `Security` | `{ownedTable='mdp_vehicles'}` | passed to server/security.lua |
 | `SyncFrameworkTables` | `true` | import missing plates and owner changes from the framework table |
-| `SyncRemovals` | `true` | delete framework-sourced vehicles that were removed from the framework table (with safety checks) |
+| `SyncRemovals` | `true` | soft-delete (state 5) framework-sourced vehicles that were removed from the framework table (with safety checks) |
 | `Migration` | see file | `Enabled`, `Ace`, `VehicleTypes`, `SkipJobVehicles`, `NotStored`, `BatchSize` |
 | `OnRestartOutVehicles` | `'park'` | `park` (to last coords) or `garage` (to DefaultGarage) |
 | `OnDisconnect` | `'keep'` | driver disconnects: `keep` (parked in place), `garage` (DefaultGarage), `impound` |
@@ -111,4 +111,4 @@ Every key is commented in the file as description · values · default. Summary:
 Garages accept the vehicle types listed in their `types` (automobile, bike, boat, heli, plane). The type is detected on store (config override, then the server native, then the client class) and is used when the vehicle is spawned.
 
 ## Restart behaviour
-On start, vehicles left OUT are converted atomically (parked at their last coords, or sent to the default garage), and leftover entities are cleaned up. Nothing depends on memory from a previous run. When a player disconnects while driving one of our vehicles, `Config.OnDisconnect` applies.
+On start, vehicles left OUT are reconciled with the world. If an entity with the plate and model still exists, it's adopted (parked where it is with `'park'`, or garaged with `'garage'`); otherwise the vehicle goes to `Config.DefaultGarage`. Nothing depends on memory from a previous run. When a player disconnects while driving one of our vehicles, `Config.OnDisconnect` applies.

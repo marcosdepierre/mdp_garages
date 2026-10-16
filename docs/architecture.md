@@ -50,14 +50,16 @@ Tables are prefixed `mdp_` so they don't clash with ESX `owned_vehicles` / QB `p
 | Table | Purpose | Key indexes / FKs |
 |---|---|---|
 | `mdp_vehicles` | one row per owned vehicle: props, coords JSON, heading, `state` TINYINT, `vtype` (v2), `source` (v3: `framework` = imported by sync/migrate, `mdp` = AddVehicle/own or pre-v3), fuel, engine, body, mileage, garage_id | UNIQUE plate; owner, state, garage_id |
-| `mdp_vehicle_keys` | shared keys | UNIQUE(plate, holder); holder; FK plate CASCADE |
+| `mdp_vehicle_keys` | shared keys | UNIQUE(plate, holder); holder; FK plate CASCADE (keys only make sense with the vehicle; vehicles are soft-deleted, so the cascade only fires on a manual hard delete) |
 | `mdp_private_garages` | purchased garages with interior; `config_id` = property key from server config | owner; UNIQUE(owner, config_id) stops a double click from buying twice; UNIQUE(owner, label) |
 | `mdp_impound` | impound records (fee, release_after, location, released) | plate, released; FK plate CASCADE |
-| `mdp_fines` | fines; `channel` ENUM internal/invoice/external/needs_review, `paid` 0/1/2/3 (unpaid/paid/claiming/voided) | plate, owner, paid; FK plate CASCADE |
+| `mdp_fines` | fines; `owner` NOT NULL (identifier at issue time); `channel` ENUM internal/invoice/external/needs_review; `paid` 0/1/2/3 (unpaid/paid/charging/voided) | plate, owner, paid. **No FK to `mdp_vehicles` (v4)**: fines survive vehicle removal or sale; on upgraded DBs the old FK is dropped at start |
 | `mdp_fine_invoices` | billing invoice → fine mapping (`provider`, `invoice_id`, `fine_id`), written by `Bridge.BillingCommon.Link` and read by `Bridge.BillingCommon.OnPaid` (bridge/billing/_common.lua; the table is created by `sql/install.sql`) | PK(provider, invoice_id); fine_id `INT UNSIGNED` FK → `mdp_fines(id)` ON DELETE CASCADE |
-| `mdp_schema_version` | applied schema versions (currently **3**: v2 adds `mdp_vehicles.vtype`, v3 adds `mdp_vehicles.source`). `server/persistence.lua` checks `information_schema` at start and ALTERs only what's missing; manual alternative for v2: `sql/upgrade_v2.sql`. The server warns at start if the version is lower than `Constants.SchemaVersion` | PK(version) |
+| `mdp_schema_version` | applied schema versions (currently **4**: v2 adds `mdp_vehicles.vtype`, v3 adds `mdp_vehicles.source`, v4 drops the FK `mdp_fines → mdp_vehicles` (checked in `information_schema.REFERENTIAL_CONSTRAINTS`) and adds state 5). `server/persistence.lua` checks `information_schema` at start and ALTERs only what's missing; manual alternative for v2: `sql/upgrade_v2.sql`. The server warns at start if the version is lower than `Constants.SchemaVersion` | PK(version) |
 
-`state` constants (`shared/constants.lua`): `Constants.VehicleState`: `0=OUT, 1=GARAGED, 2=PARKED_WORLD, 3=IMPOUNDED, 4=RETIRED`.
+`state` constants (`shared/constants.lua`): `Constants.VehicleState`: `0=OUT, 1=GARAGED, 2=PARKED_WORLD, 3=IMPOUNDED, 4=RETIRED, 5=REMOVED`.
+
+`REMOVED` (5) is a **soft delete**: the vehicle was removed from the framework table (`Config.SyncRemovals`). Its row, fines, impound and key rows are kept. It is never sent to the NUI (excluded from `getVehicles`), can't be taken out or stored (`not_found`), doesn't count toward world-parking limits, and is ignored by restart recovery. If the plate reappears in the framework table, sync restores it (GARAGED, or OUT if a live entity exists) and transfers the owner if needed.
 
 `RETIRED` (4) is **phase 7, schema only for now**: a world-parked car left inactive for `Config.InactivityRetireHours` (72 h, measured from `mdp_vehicles.parked_at`, indexed by `(state, parked_at)`) gets removed from the world. It can be recovered from the phone app. No logic exists yet.
 
@@ -96,9 +98,9 @@ Server modules hang off one global, `MDP` (`server/core.lua`): `MDP.Ready`, `MDP
 `mdp_vehicles` is the source of truth. Framework tables are only read, never written.
 - **Diff-based sync** (R3-2): the framework rows are compared against existing `mdp_vehicles` rows. Only **new plates** are inserted (`INSERT IGNORE`, `source='framework'`), and unchanged rows cause no writes.
 - **Owner changes** (R3-3) apply only when the mdp row is in state **1 (garaged) or 2 (world-parked)**: `UPDATE … WHERE plate=? AND owner=<old> AND state IN (1,2)`, after which **all keys of the plate are revoked** and the change is logged. If the row is in state 0 (out) or 3 (impounded), the change is logged as deferred and retried at the next sync. `AddVehicle` follows the same rule and returns `false, 'transfer_deferred'`.
-- **Initial state on import:** QB `state=0` and ESX `stored=0` (with `Config.Migration.NotStored='out'`, the default) import as **OUT**, so a freshly bought car can be stored at a garage. `AddVehicle(..., 'out')` does the same for a vehicle that's already spawned.
+- **Initial state on import:** QB `state=0` and ESX `stored=0` (with `Config.Migration.NotStored='out'`, the default) import as **OUT**, but **only if a live entity with that plate exists**; otherwise they import as GARAGED in their garage or `DefaultGarage` (R4-1). As OUT, so a freshly bought car can be stored at a garage. `AddVehicle(..., 'out')` does the same for a vehicle that's already spawned.
 - Recommended for ESX (not created by us): `ALTER TABLE owned_vehicles ADD INDEX (owner);`, because sync queries by owner.
-- **Removals** (`Config.SyncRemovals = true`): during a player's sync, their rows with **`source='framework'`** whose plate no longer exists in the framework table are deleted (keys, fines and impound rows cascade). A world entity for the plate is untracked and deleted, and each removal is logged. If the plate still exists under another owner, it is transferred instead. Safety rules:
+- **Removals** (`Config.SyncRemovals = true`): during a player's sync, their rows with **`source='framework'`** whose plate no longer exists in the framework table are **soft-deleted** (`state = 5 REMOVED`). No row is deleted, so **unpaid fines can't be escaped by selling the car**. A world entity for the plate is untracked and despawned, but **only if it's empty**; if anyone is inside, the removal is deferred to the next sync (R3b-2). Each removal is logged, and the row is restored if the plate reappears. If the plate still exists under another owner, it is transferred instead. Safety rules:
   - only `source='framework'` rows are touched (never `AddVehicle` rows or rows that existed before v3);
   - removals only run when the framework table exists and the query succeeded;
   - if the framework returns **zero rows** while the player has framework-sourced vehicles, removals are skipped with a warning, since that could be a transient issue.
@@ -111,8 +113,16 @@ Server modules hang off one global, `MDP` (`server/core.lua`): `MDP.Ready`, `MDP
 
 Nothing depends on memory from a previous run. Every state transition is a conditional `UPDATE … WHERE state = ?` with an affectedRows check. **Callbacks return `not_ready` until the steps below finish** (`MDP.Ready`). If recovery fails, callbacks stay disabled and the error is printed. On start (`MySQL.ready`):
 0. Check that `mdp_vehicles` exists, then run idempotent schema upgrades for older databases. These include `UNIQUE(owner, config_id)` on `mdp_private_garages`; legacy empty `config_id` values are filled with `legacy_<id>` first (R3-6). The upgrades add: missing `parked_at`, `vtype`, `channel` (and the `needs_review` ENUM value), `config_id` and `mdp_fine_invoices` are added after checking `information_schema`.
-1. Leftover entities of ours (state bag `mdp_plate`, which happens on a resource restart) have their coords/heading saved to their state-0 row, then they are deleted.
-2. Atomic SQL: with `Config.OnRestartOutVehicles = 'park'`, `UPDATE … SET state=2, parked_at=NOW() WHERE state=0 AND coords IS NOT NULL`. Then, in both modes, `UPDATE … SET state=1, garage_id=Config.DefaultGarage WHERE state=0`.
+1. **Reconciliation with live entities** (R4-1, R4-2). For every row in state 0 or 2, the server looks in `GetAllVehicles()` for an entity with the same normalized plate **and** matching model hash (`Utils.ModelHash`), whether or not it carries our state bag (for example a dealership car after `restart mdp_garages`).
+   - **Found → adopted**: state bag `mdp_plate` plus `Security.TrackSpawn` (owner nil until `ClaimSpawn` on reconnect). Then, for state 0:
+     - `OnRestartOutVehicles='garage'`: health saved, state 1 in `DefaultGarage`, entity deleted.
+     - `'park'` (default) with an empty vehicle: state 2 at the entity's **current** position (the entity stays).
+     - `'park'` with someone inside: stays OUT, tracked.
+     - State 2 rows stay parked and tracked.
+   - **Not found**: state 0 → **GARAGED in `DefaultGarage`** in both modes, since a car without an entity would be stuck. State 2 rows are left unchanged (the takeOut safety net spawns them).
+   - Our tagged entities (`mdp_plate`) whose row is no longer 0/2 are deleted as orphans, but only when empty.
+   - All transitions are conditional (`WHERE plate=? AND state=?`).
+2. *(merged into 1)*
 3. The spawn registry (`Security.TrackSpawn`) and plate locks start empty. World-parked cars (state 2) are respawned by the proximity spawner from the DB.
 4. Fines left at `paid=2` (CHARGING) after a crash are **not** reset, because the money may already have been taken. They move to `channel='needs_review'` (paid=0) with a console log so an admin can resolve them with `/mdp_finereview <id> paid|void`.
 5. The schema version is checked, then `MDP.Ready = true`, then connected players are synced.
@@ -236,7 +246,7 @@ Vehicle = {
   plate: string         -- normalized, 1-8 chars [A-Z0-9 ]
   model: string         -- spawn name
   label: string         -- display name
-  state: number         -- 0=out, 1=garaged, 2=parked_world, 3=impounded, 4=retired (phase 7)
+  state: number         -- 0=out, 1=garaged, 2=parked_world, 3=impounded, 4=retired (phase 7). 5=removed is never sent
   fuel: number          -- 0-100
   engine: number        -- 0-1000
   body: number          -- 0-1000
@@ -300,6 +310,7 @@ This list is definitive. `Constants.ErrorCodes` (Lua), the locale keys `ui.err_<
 - `fine_not_found`
 - `in_use`
 - `vehicle_moved`
+- `occupied`
 - `timeout`
 
 `timeout` is **NUI-only**: the NUI generates it when a callback doesn't answer, and the server never sends it. `impounded` applies to state 3 (paid release is phase 5), and `fine_not_found` comes from payFine. On the client, `Utils.ErrorCode` strips any `:<detail>` suffix (for example `plate_unresolved:no_entity` becomes `plate_unresolved`) and maps undocumented codes, such as internal Security reasons like `job_denied` or `unknown_field`, to `rejected`. Notifications use `Utils.ErrorText(code)`, which reads `ui.err_<code>`. Prices and fees are never accepted from the NUI; the server computes them from config/DB.
@@ -319,7 +330,7 @@ All request/response endpoints use **ox_lib `lib.callback`** only (there is no e
 |---|---|---|---|---|---|
 | `mdp_garages:getVehicles` | lib.callback | C→S | NUI `getVehicles` | `{garage_id}` | RATE(5/10s), schema `garage_id=V.isGarageId`, GAR(`{public,private,impound}`; impound is display only), DIST(garage 10 m); returns only vehicles the player owns or holds keys for, coords filtered by the visibility rule |
 | `mdp_garages:takeOut` | lib.callback | C→S | NUI `takeOut` | `{plate, garage_id}` | **Implemented.** not_ready guard, schema, RATE(1/s), GAR(`{public,private}`), DIST, `requireOwnership`, type check, fines threshold. State 1 in this garage, **or state 2 as a safety net** until the phase 1 proximity streamer (any garage). For state 2 with a live tracked entity: refused with **`in_use`** if any seat is occupied, or **`vehicle_moved`** if the entity is more than `Config.ParkedMoveTolerance` (5 m) from the stored coords; otherwise the entity is deleted first (R3-4). Inside `WithLock(plate, src, fn)`: conditional `UPDATE … WHERE plate=? AND state=<read state>` (affectedRows == 1), `CreateVehicleServerSetter(Utils.ModelHash(model), vtype, …)`, rollback to state 1 on spawn failure, `TrackSpawn`. Phase 1 (QA N6): give keys and apply fuel/engine/body |
-| `mdp_garages:storeVehicle` | lib.callback | C→S | player in a garage zone | `{netId, garage_id, vclass?}` | **Implemented** (`server/garages.lua`). RATE(1/s), schema, GAR(`{public,private}`), DIST(garage 10 m + vehicle 5 m). `resolvePlate` (`Security.PlateFromNetId`: entity must exist and be a vehicle, plate read and normalized server-side) → `data._plate`, `requireOwnership` on `data._plate`; model must match the DB; vtype resolved and checked against `garage.types`. Inside `WithLock(plate, src, fn)`: `UPDATE … WHERE state IN (0,2)` (affectedRows == 1) saving vtype and server-read health, `UntrackSpawn`, delete entity The player must be inside the vehicle (`not_in_vehicle`), **Anti-clone (R3-1):** if a *different* tracked entity has the plate, this one is a clone, so it is deleted and rejected (`clone_detected`). If **no** entity is tracked (spawned by a dealership or another script), the vehicle is accepted when DB ownership, model hash and **state 0 (OUT)** all match, and it is tracked at that point. Otherwise `not_tracked`. The model is compared with `Utils.ModelHash`. |
+| `mdp_garages:storeVehicle` | lib.callback | C→S | player in a garage zone | `{netId, garage_id, vclass?}` | **Implemented** (`server/garages.lua`). State 5 → `not_found`. RATE(1/s), schema, GAR(`{public,private}`), DIST(garage 10 m + vehicle 5 m). `resolvePlate` (`Security.PlateFromNetId`: entity must exist and be a vehicle, plate read and normalized server-side) → `data._plate`, `requireOwnership` on `data._plate`; model must match the DB; vtype resolved and checked against `garage.types`. Inside `WithLock(plate, src, fn)`: `UPDATE … WHERE state IN (0,2)` (affectedRows == 1) saving vtype and server-read health, `UntrackSpawn`, delete entity The player must be inside the vehicle (`not_in_vehicle`) **as the driver and alone**: any other occupant gives `occupied` (R3b-2). netId is normalized with `math.tointeger` (R4-3). **Anti-clone (R3-1):** if a *different* tracked entity has the plate, this one is a clone, so it is deleted and rejected (`clone_detected`). If **no** entity is tracked (spawned by a dealership or another script), the vehicle is accepted when DB ownership, model hash and **state 0 (OUT)** all match, and it is tracked at that point. Otherwise `not_tracked`. The model is compared with `Utils.ModelHash`. |
 | `mdp_garages:parkWorld` | lib.callback | C→S | player parks on the street | `{netId}` | RATE(1/s), DIST(vehicle 5 m), `resolvePlate` → `data._plate`, OWN, world limits (refused with `world_limit` + notify), `WithLock(plate, src, fn)`, ATOM(0→2), sets `parked_at`, coords/heading read from the server entity |
 | `mdp_garages:client:applyProps` | event | S→C | server after spawning a persistent car | `{netId, props}` | server-originated; client only applies props |
 | `mdp_garages:syncWear` | lib.callback | C→S | client every N min while driving / on exit | `{netId, mileageDelta}` | RATE, src is the driver, `resolvePlate` → `data._plate`, OWN/key, delta clamped by max plausible speed × time. **Health is read server-side** (`GetVehicleEngineHealth`/`GetVehicleBodyHealth` on the server entity), never from the client; fuel via `Bridge.Fuel` |

@@ -91,9 +91,27 @@ function Vehicles.InsertBatch(rows)
             existing[e.plate] = e
         end
         local ph, params = {}, {}
+        local worldPlates -- lazy: normalized plate -> entity, only if some new row is OUT
         for _, r in ipairs(chunk) do
             local e = existing[r.plate]
-            if not e then
+            -- R4-1: an imported OUT row without a live entity would be stuck -> GARAGED in its garage
+            if r.state == VS.OUT and (not e or tonumber(e.state) == VS.REMOVED) then
+                worldPlates = worldPlates or Utils.WorldVehiclesByPlate()
+                if not worldPlates[r.plate] then
+                    r.state = VS.GARAGED
+                    r.garage_id = r.garage_id or Config.DefaultGarage
+                end
+            end
+            if e and tonumber(e.state) == VS.REMOVED then
+                -- plate reappeared in the framework: restore (owner may have changed)
+                local n = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, owner = ?, garage_id = ? WHERE plate = ? AND state = ?',
+                    { r.state == VS.OUT and VS.OUT or VS.GARAGED, r.owner, r.garage_id or Config.DefaultGarage, r.plate, VS.REMOVED })
+                if n == 1 then
+                    print(('^3[mdp_garages] %s restored from REMOVED (reappeared in framework for %s)^0'):format(r.plate, tostring(r.owner)))
+                    if e.owner ~= r.owner then onOwnerChanged(r.plate, e.owner, r.owner) end
+                    inserted = inserted + 1
+                end
+            elseif not e then
                 ph[#ph + 1] = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'framework')"
                 -- explicit indices: props/garage_id may be nil (ipairs would stop early)
                 local vals = { r.plate, r.owner, r.model, (Config.VehicleTypes or {})[r.model] or r.vtype or 'automobile',
@@ -171,7 +189,8 @@ function Vehicles.SyncRemovals(tbl, ownerCol, owner, frameworkRows)
         local p = Utils.NormalizePlate(r.plate)
         if p then present[p] = true end
     end
-    local mine = MySQL.query.await("SELECT plate FROM mdp_vehicles WHERE owner = ? AND source = 'framework'", { owner }) or {}
+    local mine = MySQL.query.await("SELECT plate FROM mdp_vehicles WHERE owner = ? AND source = 'framework' AND state <> ?",
+        { owner, VS.REMOVED }) or {}
     if #mine == 0 then return 0 end
     if #frameworkRows == 0 then
         print(('^3[mdp_garages] sync removals skipped for %s: framework table returned 0 rows but %d framework-sourced vehicles exist (transient?)^0')
@@ -186,17 +205,24 @@ function Vehicles.SyncRemovals(tbl, ownerCol, owner, frameworkRows)
             local other = MySQL.scalar.await(('SELECT `%s` FROM `%s` WHERE UPPER(TRIM(`plate`)) = ? LIMIT 1'):format(ownerCol, tbl), { plate })
             pcall(Security.WithLock, plate, 0, function()
                 if other and other ~= owner then
-                    local n = MySQL.update.await("UPDATE mdp_vehicles SET owner = ? WHERE plate = ? AND owner = ? AND source = 'framework'",
-                        { other, plate, owner })
+                    local n = MySQL.update.await("UPDATE mdp_vehicles SET owner = ? WHERE plate = ? AND owner = ? AND source = 'framework' AND state IN (?, ?)",
+                        { other, plate, owner, VS.GARAGED, VS.PARKED_WORLD })
                     if n == 1 then onOwnerChanged(plate, owner, other) end
                     return
                 end
                 local ent = Security.GetSpawnedEntity(plate)
-                local n = MySQL.update.await("DELETE FROM mdp_vehicles WHERE plate = ? AND owner = ? AND source = 'framework'", { plate, owner })
+                -- R3b-2: never despawn with someone inside; defer to the next sync
+                if ent and not Utils.IsVehicleEmpty(ent) then
+                    print(('^3[mdp_garages] removal of %s deferred: vehicle occupied; retried next sync^0'):format(plate))
+                    return
+                end
+                -- R3b-1: SOFT delete (state 5 REMOVED). Fines/impound/keys rows are kept (fines are tied to owner).
+                local n = MySQL.update.await("UPDATE mdp_vehicles SET state = ?, coords = NULL, parked_at = NULL WHERE plate = ? AND owner = ? AND source = 'framework' AND state <> ?",
+                    { VS.REMOVED, plate, owner, VS.REMOVED })
                 if n == 1 then
                     if ent then Security.UntrackSpawn(plate); DeleteEntity(ent) end
                     removed = removed + 1
-                    print(('^3[mdp_garages] %s removed: no longer in %s for %s (keys/fines/impound cascade)^0'):format(plate, tbl, owner))
+                    print(('^3[mdp_garages] %s marked REMOVED: no longer in %s for %s (fines kept)^0'):format(plate, tbl, owner))
                 end
             end)
         end

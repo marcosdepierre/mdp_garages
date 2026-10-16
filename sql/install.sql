@@ -2,7 +2,7 @@
 -- All tables are prefixed `mdp_` to avoid clashing with ESX `owned_vehicles`
 -- and QBCore/Qbox `player_vehicles`. Framework tables are never modified.
 -- `owner` / `holder` = ESX identifier or QB/Qbox citizenid (Bridge.GetIdentifier).
--- mdp_vehicles.state: 0=out, 1=garaged, 2=parked_world, 3=impounded, 4=retired (Constants.VehicleState)
+-- mdp_vehicles.state: 0=out, 1=garaged, 2=parked_world, 3=impounded, 4=retired, 5=removed (soft delete) (Constants.VehicleState)
 -- Plates: VARCHAR(12) for headroom; code enforces 1-8 chars [A-Z0-9 ] (Utils.IsValidPlate).
 -- Not applied automatically: run this file once (HeidiSQL / mysql CLI). Safe to re-run.
 
@@ -95,9 +95,8 @@ CREATE TABLE IF NOT EXISTS `mdp_fines` (
   PRIMARY KEY (`id`),
   KEY `idx_mdp_fines_plate` (`plate`),
   KEY `idx_mdp_fines_owner` (`owner`),
-  KEY `idx_mdp_fines_paid` (`paid`),
-  CONSTRAINT `fk_mdp_fines_plate` FOREIGN KEY (`plate`) REFERENCES `mdp_vehicles` (`plate`)
-    ON DELETE CASCADE ON UPDATE CASCADE
+  KEY `idx_mdp_fines_paid` (`paid`)
+  -- no FK to mdp_vehicles (v4): fines are tied to `owner` and must survive vehicle removal/sale
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Invoice -> fine mapping used by billing adapters (bridge/billing/_common.lua also creates it at runtime).
@@ -119,6 +118,6 @@ CREATE TABLE IF NOT EXISTS `mdp_schema_version` (
   PRIMARY KEY (`version`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-INSERT IGNORE INTO `mdp_schema_version` (`version`) VALUES (1), (2), (3);
--- v2: mdp_vehicles.vtype. v3: mdp_vehicles.source. Existing v1 installs are upgraded automatically on resource start
+INSERT IGNORE INTO `mdp_schema_version` (`version`) VALUES (1), (2), (3), (4);
+-- v2: mdp_vehicles.vtype. v3: mdp_vehicles.source. v4: no FK mdp_fines -> mdp_vehicles; state 5 REMOVED. Existing v1 installs are upgraded automatically on resource start
 -- (server/persistence.lua) or manually with sql/upgrade_v2.sql.

@@ -82,5 +82,6 @@ Locales.en = {
         err_fine_not_found = 'Fine not found or already paid',
         err_in_use = 'Someone is using this vehicle',
         err_vehicle_moved = 'This vehicle is no longer where it was parked',
+        err_occupied = 'Everyone else must leave the vehicle first (you must be the driver)',
     },
 }

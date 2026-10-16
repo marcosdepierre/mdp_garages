@@ -8,6 +8,7 @@ Constants.VehicleState = {
     PARKED_WORLD = 2, -- physically parked in the world, respawned after restart
     IMPOUNDED = 3,    -- police impound / tow yard
     RETIRED = 4,      -- phase 7: auto-retired after Config.InactivityRetireHours; recoverable from phone app
+    REMOVED = 5,      -- soft-deleted: removed from the framework table (SyncRemovals); never sent to the NUI, restored if it reappears
 }
 
 -- mdp_fines.paid (TINYINT)
@@ -34,8 +35,8 @@ for _, c in ipairs({
     'already_out', 'retired', 'impounded', 'no_spawn', 'spawn_failed', 'unpaid_fines',
     'insufficient_funds', 'world_limit', 'external_invoice', 'not_ready', 'wrong_vehicle_type', 'plate_unresolved',
     'invalid_state', 'not_in_vehicle', 'clone_detected', 'not_tracked', 'invalid_source', 'already_paid',
-    'invalid_amount', 'fine_not_found', 'in_use', 'vehicle_moved', 'timeout'
+    'invalid_amount', 'fine_not_found', 'in_use', 'vehicle_moved', 'occupied', 'timeout'
 }) do Constants.ErrorCodes[c] = true end
 
 -- Schema version expected by this code (mdp_schema_version)
-Constants.SchemaVersion = 3
+Constants.SchemaVersion = 4

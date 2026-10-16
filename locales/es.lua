@@ -82,5 +82,6 @@ Locales.es = {
         err_fine_not_found = 'Multa no encontrada o ya pagada',
         err_in_use = 'Alguien está usando este vehículo',
         err_vehicle_moved = 'Este vehículo ya no está donde se aparcó',
+        err_occupied = 'Los demás deben bajarse del vehículo primero (debes ser el conductor)',
     },
 }

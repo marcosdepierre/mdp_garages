@@ -20,7 +20,8 @@ local function listVehicles(src, garage)
     local rows = MySQL.query.await([[
         SELECT v.plate, v.owner, v.model, v.vtype, v.coords, v.state, v.fuel, v.engine, v.body, v.mileage, v.garage_id
         FROM mdp_vehicles v
-        WHERE v.owner = ? OR v.plate IN (SELECT k.plate FROM mdp_vehicle_keys k WHERE k.holder = ?)]], { ident, ident }) or {}
+        WHERE (v.owner = ? OR v.plate IN (SELECT k.plate FROM mdp_vehicle_keys k WHERE k.holder = ?)) AND v.state <> ?]],
+        { ident, ident, VS.REMOVED }) or {}
     local out = {}
     for _, r in ipairs(rows) do
       -- type filter (QA N10): vehicles whose type this garage cannot hold are NOT listed at all
@@ -83,7 +84,7 @@ MDP.Callback('mdp_garages:takeOut', {
     if not garage then return { ok = false, error = gerr } end
     local plate = data.plate -- already normalized by ValidateSchema
     local row = MySQL.single.await('SELECT model, vtype, props, state, garage_id, coords FROM mdp_vehicles WHERE plate = ?', { plate })
-    if not row then return { ok = false, error = 'not_found' } end
+    if not row or tonumber(row.state) == VS.REMOVED then return { ok = false, error = 'not_found' } end
     if tonumber(row.state) == VS.RETIRED then return { ok = false, error = 'retired' } end
     local state = tonumber(row.state)
     -- QA N2 safety net (until the phase 1 proximity streamer): PARKED_WORLD can also be taken out from any garage
@@ -171,7 +172,11 @@ end
 
 --- Shared resolver for every netId-based handler (store, parkWorld, tow, fine, impound, syncWear).
 function MDP.Vehicles.ResolvePlateFromNetId(_, data)
-    local plate, err = Security.PlateFromNetId(data and data.netId)
+    -- R4-3: netId must be an integer (5.0 -> 5); PlateFromNetId/TrackSpawn require math.type 'integer'
+    local netId = data and math.tointeger(data.netId)
+    if not netId then return nil, 'bad_netid' end
+    data.netId = netId
+    local plate, err = Security.PlateFromNetId(netId)
     return plate, err
 end
 
@@ -190,9 +195,13 @@ MDP.Callback('mdp_garages:storeVehicle', {
     if not Security.IsNear(src, GetEntityCoords(veh), Config.MaxVehicleDistance) then return { ok = false, error = 'too_far' } end
     local row = MySQL.single.await('SELECT model, state FROM mdp_vehicles WHERE plate = ?', { plate })
     if not row then return { ok = false, error = 'not_owner' } end
+    if tonumber(row.state) == VS.REMOVED then return { ok = false, error = 'not_found' } end
     if GetEntityModel(veh) ~= Utils.ModelHash(row.model) then return { ok = false, error = 'invalid_request' } end
     -- QA N13: player must be in the vehicle, and it must be OUR tracked entity (anti-clone)
-    if GetVehiclePedIsIn(GetPlayerPed(src), false) ~= veh then return { ok = false, error = 'not_in_vehicle' } end
+    local ped = GetPlayerPed(src)
+    if GetVehiclePedIsIn(ped, false) ~= veh then return { ok = false, error = 'not_in_vehicle' } end
+    -- R3b-2: the storing player must be the driver and alone (never delete an entity with others inside)
+    if not Utils.OnlyDriverInside(veh, ped) then return { ok = false, error = 'occupied' } end
     local tracked = Security.GetSpawnedEntity(plate)
     if tracked and tracked ~= veh then
         -- another tracked entity has this plate: this one is a clone
@@ -204,7 +213,7 @@ MDP.Callback('mdp_garages:storeVehicle', {
         -- R3-1: not spawned by us (dealership, other script). Accept if DB ownership (requireOwnership above),
         -- model hash (checked above) and state OUT match; then track it.
         if tonumber(row.state) ~= VS.OUT then return { ok = false, error = 'not_tracked' } end
-        Security.TrackSpawn(plate, data.netId, src)
+        Security.TrackSpawn(plate, math.tointeger(data.netId), src)
         Entity(veh).state:set('mdp_plate', plate, true)
     end
     local vtype = resolveVehicleType(veh, row.model, data.vclass)

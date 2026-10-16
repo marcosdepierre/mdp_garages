@@ -58,8 +58,8 @@ Config.Security = { ownedTable = 'mdp_vehicles', despawnOnDropMs = nil }
 -- On player load, import plates missing from mdp_vehicles out of owned_vehicles / player_vehicles
 -- (INSERT IGNORE, originals untouched) so dealership purchases appear · boolean · true
 Config.SyncFrameworkTables = true
--- During a player's sync, DELETE their vehicles that no longer exist in the framework table (cascade keys/fines/impound,
--- despawn if in world). Only rows with source='framework' (imported by sync/migrate), only after a successful query;
+-- During a player's sync, SOFT-DELETE (state 5 REMOVED) their vehicles that no longer exist in the framework table
+-- (fines/impound/keys kept; despawned only if empty, else deferred; restored if the plate reappears). Only rows with source='framework' (imported by sync/migrate), only after a successful query;
 -- skipped with a warning if the framework returns 0 rows while framework-sourced vehicles exist · boolean · true
 Config.SyncRemovals = true
 -- One-off importer (sql/migrate.lua). Enabled = run once on start; also restricted command `mdp_migrate`
@@ -87,8 +87,9 @@ Config.ESXParkingMap = {
 ---------------------------------------------------------------------------
 -- Restart / persistence
 ---------------------------------------------------------------------------
--- What happens to vehicles still OUT (state 0) when the resource starts
--- · 'park' (-> 2 at last known coords; no coords -> garage) | 'garage' (-> 1 in DefaultGarage) · 'park'
+-- Vehicles still OUT (state 0) at resource start whose entity still exists (adopted by plate+model):
+-- · 'park' (-> 2 where the entity is, if empty) | 'garage' (-> 1 in DefaultGarage, entity deleted) · 'park'
+-- OUT vehicles WITHOUT a live entity always go to DefaultGarage.
 Config.OnRestartOutVehicles = 'park'
 -- What happens to a tracked vehicle the player was DRIVING when they disconnect
 -- · 'keep' (state 2 at its position, parked_at=NOW, coords/heading/health saved) | 'garage' (state 1 in DefaultGarage,

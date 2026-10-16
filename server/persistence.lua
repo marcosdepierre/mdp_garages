@@ -71,7 +71,14 @@ local function upgradeSchema()
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci]])
         print('[mdp_garages] schema upgrade: created mdp_fine_invoices')
     end
-    MySQL.insert.await('INSERT IGNORE INTO mdp_schema_version (version) VALUES (1), (2), (3)')
+    -- v4 (R3b-1): fines must survive vehicle removal -> drop the old FK mdp_fines -> mdp_vehicles if present
+    local fk = MySQL.scalar.await([[SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS
+        WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'mdp_fines' AND REFERENCED_TABLE_NAME = 'mdp_vehicles' LIMIT 1]])
+    if fk and tostring(fk):match('^[%w_]+$') then
+        MySQL.query.await(('ALTER TABLE `mdp_fines` DROP FOREIGN KEY `%s`'):format(fk))
+        print('[mdp_garages] schema upgrade v4: dropped FK ' .. fk .. ' (fines no longer cascade with vehicles)')
+    end
+    MySQL.insert.await('INSERT IGNORE INTO mdp_schema_version (version) VALUES (1), (2), (3), (4)')
 end
 
 local function onStart()
@@ -79,24 +86,53 @@ local function onStart()
         error('table mdp_vehicles not found: run sql/install.sql on this database first', 0)
     end
     upgradeSchema() -- errors abort this attempt (MDP.Ready stays false)
-    -- 1) Leftover entities (resource restart without server restart): persist position, remove entity.
-    local cleaned = 0
-    forEachOwnEntity(function(veh, plate)
-        pcall(saveEntityCoords, veh, plate)
-        DeleteEntity(veh)
-        cleaned = cleaned + 1
-    end)
-    -- 2) Atomic conversion of OUT rows.
-    local parked, garaged = 0, 0
-    if Config.OnRestartOutVehicles == 'park' then
-        parked = MySQL.update.await(
-            'UPDATE mdp_vehicles SET state = ?, parked_at = CURRENT_TIMESTAMP WHERE state = ? AND coords IS NOT NULL',
-            { VS.PARKED_WORLD, VS.OUT }) or 0
+    -- 1+2) OUT / world-parked reconciliation with live entities (R4-1, R4-2). Nothing from a previous run's memory:
+    --   a) live entity with the row's normalized plate AND matching model (tagged by us or not, e.g. a dealership car
+    --      after `restart mdp_garages`) -> ADOPT: state bag mdp_plate + TrackSpawn (owner src nil until ClaimSpawn).
+    --        state 0 + OnRestartOutVehicles='garage' -> save health, GARAGED in DefaultGarage, entity deleted
+    --        state 0 + 'park' + empty            -> PARKED_WORLD at the entity's CURRENT position (entity stays)
+    --        state 0 + 'park' + occupied         -> stays OUT, tracked
+    --        state 2                             -> stays PARKED_WORLD, tracked
+    --   b) no live entity: state 0 -> GARAGED in DefaultGarage (both modes; a car without entity would be stuck)
+    --                      state 2 -> unchanged (takeOut safety net spawns it)
+    --   c) our tagged entities (mdp_plate) whose row is not 0/2 -> orphan, deleted
+    local world = Utils.WorldVehiclesByPlate()
+    local rows = MySQL.query.await('SELECT plate, model, state FROM mdp_vehicles WHERE state IN (?, ?)', { VS.OUT, VS.PARKED_WORLD }) or {}
+    local wanted, adopted, parked, garaged = {}, 0, 0, 0
+    local mode = Config.OnRestartOutVehicles or 'park'
+    for _, r in ipairs(rows) do
+        local plate, st = r.plate, tonumber(r.state)
+        local ent = world[plate]
+        if ent and GetEntityModel(ent) ~= Utils.ModelHash(r.model) then ent = nil end
+        if ent then
+            wanted[plate] = true
+            Entity(ent).state:set('mdp_plate', plate, true)
+            Security.TrackSpawn(plate, NetworkGetNetworkIdFromEntity(ent), nil)
+            adopted = adopted + 1
+            if st == VS.OUT then
+                local c, h = GetEntityCoords(ent), GetEntityHeading(ent)
+                if mode == 'garage' then
+                    local n = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, garage_id = ?, engine = ?, body = ?, coords = NULL WHERE plate = ? AND state = ?',
+                        { VS.GARAGED, Config.DefaultGarage, GetVehicleEngineHealth(ent), GetVehicleBodyHealth(ent), plate, VS.OUT })
+                    if n == 1 then Security.UntrackSpawn(plate); DeleteEntity(ent); wanted[plate] = nil; garaged = garaged + 1 end
+                elseif Utils.IsVehicleEmpty(ent) then
+                    local n = MySQL.update.await([[UPDATE mdp_vehicles SET state = ?, coords = ?, heading = ?, parked_at = CURRENT_TIMESTAMP
+                        WHERE plate = ? AND state = ?]], { VS.PARKED_WORLD, json.encode({ x = c.x, y = c.y, z = c.z }), h, plate, VS.OUT })
+                    if n == 1 then parked = parked + 1 end
+                end
+            end
+        elseif st == VS.OUT then
+            local n = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, garage_id = ?, coords = NULL WHERE plate = ? AND state = ?',
+                { VS.GARAGED, Config.DefaultGarage, plate, VS.OUT })
+            if n == 1 then garaged = garaged + 1 end
+        end
     end
-    garaged = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, garage_id = ? WHERE state = ?',
-        { VS.GARAGED, Config.DefaultGarage, VS.OUT }) or 0
-    print(('[mdp_garages] restart recovery: %d leftover entities removed, %d OUT -> parked_world, %d OUT -> %s')
-        :format(cleaned, parked, garaged, Config.DefaultGarage))
+    local orphans = 0
+    forEachOwnEntity(function(veh, plate)
+        if not wanted[plate] and Utils.IsVehicleEmpty(veh) then DeleteEntity(veh); orphans = orphans + 1 end
+    end)
+    print(('[mdp_garages] restart recovery: %d entities adopted, %d OUT -> parked_world, %d OUT -> %s, %d orphan entities removed')
+        :format(adopted, parked, garaged, Config.DefaultGarage, orphans))
     -- 3) Interrupted fine payments (paid=2 CHARGING): money may already have been taken, so never reset blindly.
     --    Move them to channel needs_review (paid=0) for an admin to resolve with /mdp_finereview <id> paid|void (QA N5).
     local FS = Constants.FineStatus

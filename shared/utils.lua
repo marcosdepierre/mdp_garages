@@ -124,3 +124,34 @@ function Utils.ErrorText(code)
     local ui = Utils.UILocale()
     return ui['err_' .. Utils.ErrorCode(code)] or ui.error or tostring(code)
 end
+
+--- Server: true if no ped sits in any seat of the vehicle.
+function Utils.IsVehicleEmpty(veh)
+    local seats = (GetVehicleMaxNumberOfPassengers and GetVehicleMaxNumberOfPassengers(veh)) or 6
+    for seat = -1, seats - 1 do
+        local ped = GetPedInVehicleSeat(veh, seat)
+        if ped and ped ~= 0 then return false end
+    end
+    return true
+end
+
+--- Server: true if only `driverPed` (in seat -1) is inside.
+function Utils.OnlyDriverInside(veh, driverPed)
+    if GetPedInVehicleSeat(veh, -1) ~= driverPed then return false end
+    local seats = (GetVehicleMaxNumberOfPassengers and GetVehicleMaxNumberOfPassengers(veh)) or 6
+    for seat = 0, seats - 1 do
+        local ped = GetPedInVehicleSeat(veh, seat)
+        if ped and ped ~= 0 then return false end
+    end
+    return true
+end
+
+--- Server: map of normalized plate -> entity for all live world vehicles (O(n), call once per batch).
+function Utils.WorldVehiclesByPlate()
+    local map = {}
+    for _, veh in ipairs(GetAllVehicles()) do
+        local p = Utils.NormalizePlate(GetVehicleNumberPlateText(veh))
+        if p and p ~= '' then map[p] = veh end
+    end
+    return map
+end
