@@ -22,6 +22,11 @@ Locales.en = {
     err_wrong_vehicle_type = 'This garage does not accept this type of vehicle',
     err_not_ready = 'The garage system is starting, try again in a moment',
     -- UI strings sent to the NUI in the 'open' message (locale field)
+    -- /mdp_finereview (Integrations)
+    finereview_usage = 'Usage: /mdp_finereview <id> paid|void',
+    finereview_paid = 'Fine #%d marked as paid',
+    finereview_voided = 'Fine #%d voided',
+    finereview_nochange = 'Fine #%d: no changes (%s)',
     ui = {
         title = 'Garage',
         close = 'Close',

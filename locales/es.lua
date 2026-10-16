@@ -22,6 +22,11 @@ Locales.es = {
     err_wrong_vehicle_type = 'Este garaje no admite este tipo de vehículo',
     err_not_ready = 'El sistema de garajes se está iniciando, inténtalo en un momento',
     -- UI strings sent to the NUI in the 'open' message (locale field)
+    -- /mdp_finereview (Integrations)
+    finereview_usage = 'Uso: /mdp_finereview <id> paid|void',
+    finereview_paid = 'Multa #%d marcada como pagada',
+    finereview_voided = 'Multa #%d anulada',
+    finereview_nochange = 'Multa #%d: sin cambios (%s)',
     ui = {
         title = 'Garaje',
         close = 'Cerrar',

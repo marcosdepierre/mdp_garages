@@ -1,7 +1,7 @@
 -- /mdp_finereview <id> paid|void  (Integrations). Resolves fines left in channel='needs_review'
 -- (invoice created by the billing resource but the mdp_fine_invoices link failed).
 -- Permission: console, or ACE 'mdp_garages.admin'.
-local FS = Constants.FineStatus   -- UNPAID=0, PAID=1, CLAIMING=2, VOIDED=3 (shared/constants.lua)
+local FS = Constants.FineStatus   -- UNPAID=0, PAID=1, CHARGING=2 (alias CLAIMING), VOIDED=3 (shared/constants.lua)
 local CH = Constants.FineChannel  -- NEEDS_REVIEW='needs_review', INVOICE='invoice'
 local ACE = 'mdp_garages.admin'
 
@@ -43,14 +43,14 @@ RegisterCommand('mdp_finereview', function(src, args)
     local fineId = math.tointeger(tonumber(args[1]))
     local action = type(args[2]) == 'string' and args[2]:lower() or nil
     if not fineId or fineId <= 0 or fineId > 4294967295 or (action ~= 'paid' and action ~= 'void') then
-        return reply(src, 'Uso: /mdp_finereview <id> paid|void', 'error')
+        return reply(src, _L('finereview_usage'), 'error')
     end
     local ok, done = pcall(action == 'paid' and markPaid or voidFine, fineId, src)
     local result = (ok and done) and 'ok' or (ok and 'not_found_or_not_in_review' or ('error: ' .. tostring(done)))
     log(src, fineId, action, result)
     if ok and done then
-        reply(src, ('Multa #%d %s'):format(fineId, action == 'paid' and 'marcada como pagada' or 'anulada'), 'success')
+        reply(src, _L(action == 'paid' and 'finereview_paid' or 'finereview_voided', fineId), 'success')
     else
-        reply(src, ('Multa #%d: sin cambios (%s)'):format(fineId, result), 'error')
+        reply(src, _L('finereview_nochange', fineId, result), 'error')
     end
 end, false)

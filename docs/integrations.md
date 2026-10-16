@@ -39,7 +39,7 @@ local function try(fn, ...) local ok, res = pcall(fn, ...) if not ok then print(
 
 **Multas: canales y revisión (decisiones del Senior):**
 - `impl.SupportsFines`: vale `true` en esx_billing y qb-phone, y `false` en **okokBilling**. okok **no se usa para multas** porque no tiene paid hook ni devuelve un id de factura. Si okok está detectado, `IssueFine` envía la multa por el canal `internal` (`/mdp_payfine` o la UI) y al arrancar se muestra un aviso en consola. okok sigue siendo válido para tasas con `Config.ChargeMode = 'invoice'`.
-- `mdp_fines.channel` (`Constants.FineChannel`) puede ser `internal`, `invoice`, `external` o `needs_review`. `mdp_fines.paid` (`Constants.FineStatus`) puede ser `UNPAID=0`, `PAID=1`, `CLAIMING=2` o `VOIDED=3`. La anulación usa `paid = VOIDED`, sin columna nueva, y está aislada en `voidFine()` dentro de `server/fine_review.lua`.
+- `mdp_fines.channel` (`Constants.FineChannel`) puede ser `internal`, `invoice`, `external` o `needs_review`. `mdp_fines.paid` (`Constants.FineStatus`) puede ser `UNPAID=0`, `PAID=1`, `CHARGING=2` (alias obsoleto `CLAIMING`) o `VOIDED=3`. La anulación usa `paid = VOIDED`, sin columna nueva, y está aislada en `voidFine()` dentro de `server/fine_review.lua`.
 - `Bridge.BillingCommon.Link(...)` devuelve un boolean y registra el fallo en el log. Si `SendBill` crea la factura pero el enlace no se guarda (`HasInvoice` es false), `IssueFine` pone `channel = 'needs_review'` y lo registra en el log. Con ese estado, `/mdp_payfine` queda bloqueado para evitar el doble cobro.
 - `Bridge.BillingCommon.OnPaid` es idempotente: resuelve el `fineId` solo a través de `mdp_fine_invoices`, usa un guard in-flight por `fineId` y llama a `MarkFinePaid` como máximo una vez. Nunca mueve dinero.
 - Comando de administración `/mdp_finereview <id> paid|void` (`server/fine_review.lua`). Lo puede usar la consola o cualquiera con el ACE `mdp_garages.admin` (`add_ace group.admin mdp_garages.admin allow`). Solo actúa sobre filas con `channel='needs_review'` y `paid=UNPAID`:
@@ -53,6 +53,8 @@ local function try(fn, ...) local ok, res = pcall(fn, ...) if not ok then print(
 - `OnPaid`: si `MarkFinePaid` falla, se registra siempre en el log y la multa (`UNPAID` + `invoice`) pasa a `needs_review`.
 - okokBilling: ⚠️ el uso de `CreateCustomInvoice` desde el servidor **no está verificado** (el handler probablemente depende de `source`). Va **el último** en la prioridad automática. Nunca se usa para multas. Para tasas solo se dispara si `Config.OkokTrustServerEvent = true`; si no, `SendBill` devuelve `false` y se cobra en modo instant.
 - Keys: las matrículas se normalizan con `Utils.NormalizePlate` / `Utils.IsValidPlate`. En el cliente, qbx `HasKeys` acepta una entidad o una matrícula (busca la entidad en el pool `CVehicle`).
+- qbx_vehiclekeys en el cliente: `HasKeys(vehicle)` recibe una **entidad** (✅ `client/functions.lua`: `---@param vehicle number`, usa `Entity(vehicle).state`). El adaptador convierte la matrícula en entidad con `Bridge.KeysCommon.ToEntity`. `ToPlate` normaliza con `Utils.NormalizePlate` dentro del propio helper.
+- `/mdp_finereview` usa las claves de locale `finereview_usage`, `finereview_paid`, `finereview_voided` y `finereview_nochange` (en `locales/es.lua` y `locales/en.lua`).
 - ox_lib: `info` se traduce a `inform` (`TYPES` en `bridge/notify/ox_lib.lua`; ox_lib solo acepta `inform|success|error|warning`).
 
 Implementado en `bridge/billing/esx_billing.lua`, `qb-phone.lua`, `okokBilling.lua` y `_common.lua`. Ejemplo (esx_billing):
@@ -225,7 +227,7 @@ Config.Phone     = 'auto' -- 'lb-phone' | 'npwd' | 'qb-phone' | 'none'
 Estados de vehículo: `mdp_vehicles.state` es TINYINT. Las constantes están en `shared/constants.lua` (ya existía, no se ha modificado):
 ```lua
 Constants.VehicleState = { OUT = 0, GARAGED = 1, PARKED_WORLD = 2, IMPOUNDED = 3, RETIRED = 4 }
-Constants.FineStatus   = { UNPAID = 0, PAID = 1, CLAIMING = 2, VOIDED = 3 }
+Constants.FineStatus   = { UNPAID = 0, PAID = 1, CHARGING = 2 --[[alias CLAIMING]], VOIDED = 3 }
 ```
 Nota: la decisión decía `PARKED`, pero el archivo existente usa `PARKED_WORLD`. Se mantiene `PARKED_WORLD`. Todas las tablas llevan el prefijo `mdp_` (`mdp_vehicles`, `mdp_fines`, `mdp_fine_invoices`). `vehicle` es la matrícula (string), salvo que se indique otra cosa.
 
