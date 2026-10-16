@@ -118,7 +118,13 @@ local function onStart()
             local okC, dc = pcall(json.decode, r.coords or '')
             local dbCoords = (okC and type(dc) == 'table' and tonumber(dc.x)) and vec3(dc.x, dc.y, dc.z) or nil
             local can, why = Security.CanAdopt(ent, plate, dbCoords, Utils.ModelHash(r.model))
-            if not can and st == VS.OUT and (why == 'occupied' or why == 'moved') and Security.IsServerEntity(ent, plate) then can = true end
+            -- accepted exception: (a) state OUT, (b) IsServerEntity, (c) model already matched (CanAdopt checks model before
+            -- occupied/moved), (d) tracked with owner nil, no ClaimSpawn to the driver (N4), (f) later saves validate coords (L4)
+            if not can and st == VS.OUT and (why == 'occupied' or why == 'moved') and Security.IsServerEntity(ent, plate)
+                and GetEntityModel(ent) == Utils.ModelHash(r.model) then
+                print(('^3[mdp_garages] restart: %s adopted despite %s (own server entity, state OUT)^0'):format(plate, why)) -- (e)
+                can = true
+            end
             if not can then
                 if Utils.IsVehicleEmpty(ent) then
                     print(('^3[mdp_garages] restart: entity for %s not adoptable (%s), deleted^0'):format(plate, tostring(why)))
