@@ -1,7 +1,7 @@
 -- Phase 1: vehicle props persistence + shared server spawn (takeOut and parked streamer).
 -- Props validation authority: Security.SanitizeProps(props, dbRow, entity) -> clean, nil, json | nil, err.
 MDP.Props = {}
-local MAX_PROPS_JSON = 16 * 1024
+local MAX_PROPS_JSON = 16 * 1024 -- DB props above this are never replicated
 
 local function clampFuel(v)
     if Bridge.FuelCommon and Bridge.FuelCommon.Clamp then return Bridge.FuelCommon.Clamp(v) end
@@ -10,11 +10,8 @@ local function clampFuel(v)
 end
 
 --- Health clamp for every save (M4). kind = 'engine' | 'body'.
-function MDP.Props.Health(kind, v)
-    if Security.ClampHealth then return Security.ClampHealth(kind, v) end
-    v = tonumber(v); if not v or v ~= v then return 1000.0 end
-    return math.max(0.0, math.min(1000.0, v))
-end
+--- Single range authority: Security.ClampHealth (engine -4000..1000, body 0..1000).
+function MDP.Props.Health(kind, v) return Security.ClampHealth(kind, v) end
 
 --- L4: coords from an entity are only stored if finite and inside the map.
 function MDP.Props.ValidCoords(c)
@@ -30,18 +27,12 @@ end
 function MDP.Props.Sanitize(props, dbRow, veh)
     if props == nil then return nil, nil end
     if type(props) ~= 'table' then return nil, 'props_not_table' end
-    if Security.SanitizeProps then
-        local ok, clean, err, encoded = pcall(Security.SanitizeProps, props, dbRow, veh, MDP.Props.ElapsedSec(dbRow.plate))
-        if not ok then return nil, 'sanitize_error' end
-        if not clean then return nil, err or 'invalid_props' end
-        return clean, encoded or json.encode(clean)
-    end
-    -- TODO(security): minimal guard only if Security.SanitizeProps is missing (older security.lua)
-    props.plate = dbRow.plate
-    local okE, encoded = pcall(json.encode, props)
-    if not okE or #encoded > MAX_PROPS_JSON then return nil, 'props_too_large' end
-    if props.model ~= nil and veh and Utils.ModelHash(props.model) ~= GetEntityModel(veh) then return nil, 'model_mismatch' end
-    return props, encoded
+    -- N8: no permissive fallback; without Security.SanitizeProps nothing is saved
+    if type(Security.SanitizeProps) ~= 'function' then return nil, 'sanitizer_missing' end
+    local ok, clean, err, encoded = pcall(Security.SanitizeProps, props, dbRow, veh, MDP.Props.ElapsedSec(dbRow.plate, dbRow.mileage_ts))
+    if not ok then return nil, 'sanitize_error' end
+    if not clean then return nil, err or 'invalid_props' end
+    return clean, encoded or json.encode(clean)
 end
 
 function MDP.Props.FuelServerCapable()
@@ -63,27 +54,38 @@ end
 --- Time base for the km cap: last mileage update per plate (set on spawn/takeOut/streamer spawn, store, park).
 local mileageStamp = {}
 function MDP.Props.StampMileage(plate) if plate then mileageStamp[plate] = os.time() end end
-function MDP.Props.ElapsedSec(plate)
-    return plate and mileageStamp[plate] and math.max(0, os.time() - mileageStamp[plate]) or 0
+function MDP.Props.ForgetMileage(plate) if plate then mileageStamp[plate] = nil end end
+--- Seconds since the last mileage time base. N5: falls back to the DB time (UNIX_TIMESTAMP(COALESCE(parked_at,
+--- updated_at)) selected as mileage_ts) when we never stamped the plate (dealership cars, after a restart).
+function MDP.Props.ElapsedSec(plate, dbTs)
+    local base = plate and mileageStamp[plate] or tonumber(dbTs)
+    return base and math.max(0, os.time() - math.floor(base)) or 0
+end
+--- N7: drop stamps older than 24 h (periodic sweep).
+CreateThread(function()
+    while true do
+        Wait(10 * 60000)
+        local cutoff = os.time() - 86400
+        for plate, t in pairs(mileageStamp) do if t < cutoff then mileageStamp[plate] = nil end end
+    end
+end)
+
+--- N6: unpredictable single-use token (several randoms mixed with timers and a counter).
+local tokenSeq = 0
+math.randomseed((os.time() ~ (GetGameTimer() << 16)) & 0x7FFFFFFF)
+function MDP.Props.NewToken()
+    tokenSeq = tokenSeq + 1
+    local a, b, c = math.random(0, 0x7FFFFFFF), math.random(0, 0x7FFFFFFF), math.random(0, 0x7FFFFFFF)
+    return ('%08x%08x%08x%06x'):format(a ~ GetGameTimer(), b ~ os.time(), c ~ (tokenSeq * 2654435761 & 0x7FFFFFFF), tokenSeq & 0xFFFFFF)
 end
 
---- Mileage (km) never decreases. Allowed delta = elapsed s * Config.MaxSpeedKmh / 3600 + Config.MileageMarginKm,
---- capped by Config.MaxMileageDeltaKm. Over-cap values are clamped and logged. Security.ClampMileage wins if present.
-function MDP.Props.ResolveMileage(clientKm, dbKm, plate)
+--- Mileage (km): Security.ClampMileage(plate, oldKm, newKm, elapsedSec) is the authority (never decreases, time cap).
+function MDP.Props.ResolveMileage(clientKm, dbKm, plate, dbTs)
     dbKm = tonumber(dbKm) or 0
     local v = tonumber(clientKm)
     if not v or v ~= v or v < dbKm then return dbKm end
-    local elapsed = MDP.Props.ElapsedSec(plate)
-    if Security.ClampMileage then -- Security.ClampMileage(plate, oldKm, newKm, elapsedSec) -> km
-        local ok, r = pcall(Security.ClampMileage, plate, dbKm, v, elapsed)
-        if ok and tonumber(r) then return math.max(dbKm, tonumber(r)) end
-    end
-    local allowed = math.min(elapsed * (Config.MaxSpeedKmh or 400) / 3600 + (Config.MileageMarginKm or 0.5), Config.MaxMileageDeltaKm or 50)
-    if v - dbKm > allowed then
-        print(('^3[mdp_garages] mileage over cap for %s: +%.2f km in %d s (allowed %.2f), clamped^0'):format(tostring(plate), v - dbKm, elapsed, allowed))
-        return dbKm + allowed
-    end
-    return v
+    local km = Security.ClampMileage(plate, dbKm, v, MDP.Props.ElapsedSec(plate, dbTs))
+    return math.max(dbKm, tonumber(km) or dbKm)
 end
 
 --- DB props JSON -> table (L2: oversized blobs are ignored, never replicated).
@@ -103,9 +105,10 @@ function MDP.Props.RequestApply(veh, payload, src)
     Entity(veh).state:set('mdp:props', json.encode(payload), true)
 end
 
-local function doSpawn(row, x, y, z, heading, ownerSrc)
+local function doSpawn(holder, row, x, y, z, heading, ownerSrc)
     local vtype = Utils.IsValidVehicleType(row.vtype) and row.vtype or 'automobile'
     local veh = CreateVehicleServerSetter(Utils.ModelHash(row.model), vtype, x + 0.0, y + 0.0, z + 0.0, (heading or 0.0) + 0.0)
+    holder.veh = veh -- N3: keep the handle so a later error can delete it
     local t = GetGameTimer() + 3000
     while (not veh or veh == 0 or not DoesEntityExist(veh)) and GetGameTimer() < t do Wait(50) end
     if not veh or veh == 0 or not DoesEntityExist(veh) then return nil end
@@ -128,9 +131,12 @@ end
 --- Server spawn. Caller holds the plate lock and checked GetSpawnedEntity(plate) == nil.
 --- Never throws (H1): returns veh, netId | nil, 'spawn_failed'.
 function MDP.Props.SpawnVehicle(row, x, y, z, heading, ownerSrc)
-    local ok, veh = pcall(doSpawn, row, x, y, z, heading, ownerSrc)
+    local holder = {}
+    local ok, veh = pcall(doSpawn, holder, row, x, y, z, heading, ownerSrc)
     if not ok or not veh then
         if not ok then print(('^1[mdp_garages] spawn error %s: %s^0'):format(tostring(row.plate), tostring(veh))) end
+        local h = holder.veh
+        if h and h ~= 0 and DoesEntityExist(h) then DeleteEntity(h) end -- N3: never leave an untracked entity
         return nil, 'spawn_failed'
     end
     local netId = NetworkGetNetworkIdFromEntity(veh)
