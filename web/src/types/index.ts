@@ -42,15 +42,24 @@ export interface Vehicle {
 export interface OpenData { garage: Garage; vehicles: Vehicle[] }
 
 // Lua → NUI
+/** UI strings from Lua `UILocale()` (Locales.<lang>.ui). Missing keys fall back to English. */
+export type LocaleTable = Record<string, string>;
+
 export type NuiMessage =
-  | { action: 'open'; view: ViewName; data: OpenData }
-  | { action: 'update'; data: Partial<OpenData>; view?: ViewName }
+  /** `plate` (optional, proposed): vehicle to show when view = 'detail'. */
+  | { action: 'open'; view: ViewName; data: OpenData; locale?: LocaleTable; plate?: string }
+  | { action: 'update'; data: Partial<OpenData>; view?: ViewName; plate?: string }
   | { action: 'close' };
 
 // NUI → Lua
-export type NuiErrorCode =
-  | 'invalid_request' | 'invalid_garage' | 'server_error' | 'not_owner' | 'too_far'
-  | 'rate_limited' | 'locked' | 'already_out' | 'unpaid_fines' | 'insufficient_funds' | 'world_limit';
+export const NUI_ERROR_CODES = [
+  'invalid_request', 'invalid_garage', 'wrong_garage_kind', 'unknown_garage', 'wrong_garage', 'server_error',
+  'rejected', 'not_found', 'not_owner', 'too_far', 'rate_limited', 'locked', 'already_out', 'retired',
+  'no_spawn', 'spawn_failed', 'unpaid_fines', 'insufficient_funds', 'world_limit', 'external_invoice',
+  /** NUI-only: fetchNui got no answer within 10 s (not in architecture.md yet). */
+  'timeout',
+] as const;
+export type NuiErrorCode = (typeof NUI_ERROR_CODES)[number];
 
 export interface NuiResponse<T = unknown> { ok: boolean; error?: NuiErrorCode; data?: T }
 

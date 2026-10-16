@@ -1,5 +1,5 @@
 // Browser/dev-mode mock data. Shapes = docs/architecture.md NUI contract.
-import type { Garage, NuiResponse, OpenData, Vehicle } from '@/types';
+import type { Garage, NuiMessage, NuiResponse, OpenData, Vehicle } from '@/types';
 import { VehicleState, isValidPlate } from '@/types';
 
 export const garages: Garage[] = [
@@ -35,10 +35,15 @@ export async function mockNui(event: string, data: unknown): Promise<NuiResponse
       if (!isValidPlate(d.plate ?? '')) return { ok: false, error: 'invalid_request' };
       const v = vehicles.find((x) => x.plate === d.plate);
       if (!v) return { ok: false, error: 'not_owner' };
-      if (v.state === VehicleState.Retired) return { ok: false, error: 'invalid_request' };
+      if (v.state === VehicleState.Retired) return { ok: false, error: 'retired' };
       if (v.state !== VehicleState.Garaged) return { ok: false, error: 'already_out' };
       return { ok: true, data: { netId: 1000 + Math.floor(Math.random() * 9000) } };
     }
     default: return { ok: false, error: 'invalid_request' };
   }
 }
+
+/** Spanish-ish sample locale to prove Lua-provided strings override the English fallback. */
+export const mockLocale = { title: 'Garaje', vehicles: 'Vehículos', retired_section: 'Retirados', close: 'Cerrar' };
+export const mockOpenMessage = (garage: Garage = garages[0], view: 'list' | 'detail' = 'list', plate?: string): NuiMessage =>
+  ({ action: 'open', view, data: mockOpen(garage), locale: mockLocale, plate });

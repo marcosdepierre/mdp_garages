@@ -6,41 +6,41 @@ Dark mode is on by default (`class="dark-mode"` on `<html>`). Built output: `web
 ## Structure
 ```
 web/
-  index.html            Vite entry (html.dark-mode)
-  vite.config.ts        base './' (CEF needs relative paths), outDir 'dist'
-  tokens.css            Designer-owned (--mdp-*), imported after the Untitled UI theme
+  index.html            Vite entry (<html class="dark-mode">)
+  vite.config.ts        base './' (CEF), outDir 'dist'
+  tokens.css            Designer-owned: overrides + local @font-face (src/assets/fonts) — imported LAST in globals.css
   src/
-    main.tsx, App.tsx   bootstrap; visibility, ESC, message handlers
-    types/index.ts      NUI contract types (mirrors docs/architecture.md)
-    nui/env.ts          isInGame, resourceName
-    nui/fetchNui.ts     fetchNui()
-    nui/useNuiMessages.ts  window 'message' dispatcher + emitNui() (dev)
+    main.tsx, App.tsx   bootstrap; UUI Modal shell (1180x680, scaled), ESC, message handlers
+    scale.ts            scale from 1920x1080, never < 1 while the panel fits (text >= 12px)
+    i18n.tsx            t(key): Lua `locale` from 'open' → English fallback (EN); err_<code> per NuiErrorCode
+    state.ts            vehicle state → locale key + Badge color (unknown → generic gray)
+    types/index.ts      NUI contract (docs/architecture.md), NUI_ERROR_CODES, PLATE_RE / isValidPlate (1-8)
+    nui/                env.ts, fetchNui.ts (10 s timeout), useNuiMessages.ts
     router.tsx          useRouter(): navigate/back/reset (state-based)
-    views/              ListView, DetailView (PLACEHOLDERS)
-    dev/mock.ts         mock garages/vehicles + mock callback responses
-    dev/DevToolbar.tsx  browser-only toolbar
-    components/base/    Untitled UI (added by CLI): buttons, badges
-    components/foundations/dot-icon.tsx, utils/   Untitled UI deps
-    styles/             Untitled UI theme (globals.css, theme.css, typography.css)
-  _legacy/              old vanilla skeleton (safe to delete)
+    views/              ListView, DetailView, VehicleTable, Empty (placeholder-level, UUI components only)
+    dev/                mock.ts + DevToolbar.tsx — DEV ONLY (import.meta.env.DEV), absent from dist
+    components/         Untitled UI (CLI): modal, table, empty-state, progress-indicators, badges, buttons,
+                        input, tabs (+ deps: featured-icon, tooltip, checkbox, dropdown, avatar, illustrations)
+    styles/             Untitled UI theme (globals.css → typography.css → theme.css → ../../tokens.css)
 ```
 
 ## Develop
 ```bash
 cd web
 npm install
-npm run dev        # http://localhost:5173 — browser mode: auto-opens with mock data + dev toolbar
-npm run typecheck  # tsc
-npm run build      # tsc + vite build → web/dist (commit it)
+npm run dev        # http://localhost:5173 — dev: auto-opens with mocks + dev toolbar
+npm run typecheck  # tsc -b
+npm run build      # tsc + vite build → web/dist (commit it; FiveM serves it as-is)
 ```
-Browser mode = no `GetParentResourceName` and no `window.invokeNative`. `fetchNui` then returns mocks from `src/dev/mock.ts`.
-Adding Untitled UI components: `npx untitledui@latest add <name> -y` (free components only).
+Production build outside FiveM shows nothing and fetchNui returns `{ok:false,error:'server_error'}` (no mocks shipped).
+Add components: `npx untitledui@latest add <name> -y` (FREE only; Alerts, Section headers are PRO).
 
-## API
-- `fetchNui<E>(event, data): Promise<{ ok, error?, data? }>` — POST `https://${GetParentResourceName() ?? 'mdp_garages'}/${event}`. Typed for `close`, `getVehicles`, `takeOut`.
-- Messages (`SendNUIMessage`): `open {view, data: {garage, vehicles}}`, `update {data, view?}`, `close`.
-- ESC / Close button → hide + `fetchNui('close', {})`. `takeOut` with `ok` hides the UI (Lua closes focus too).
-- Router: `const r = useRouter(); r.navigate('detail', {plate}); r.back(); r.reset('list');`
+## Behaviour / API
+- `fetchNui<E>(event, data): Promise<{ ok, error?, data? }>` — POST `https://${GetParentResourceName() ?? 'mdp_garages'}/${event}`, 10 s timeout → `error:'timeout'`.
+- Lua → NUI: `open {view, data:{garage, vehicles}, locale?, plate?}`, `update {data (merged), view?, plate?}` (ignored before the first `open`), `close` (hide).
+- ESC: `preventDefault` + `fetchNui('close')` only; the panel hides when that callback answers (or times out), or on a Lua `close` message.
+- `takeOut` ok → hide (Lua `UI.Close()` also sends `close`); error → localized `err_<code>` Badge.
+- No `innerHTML` / `dangerouslySetInnerHTML` in our source.
 
 ## Lua template
 ```lua
@@ -58,7 +58,7 @@ end)
 RegisterNUICallback('getVehicles', function(req, cb) cb({ ok = true, data = {} }) end)          -- req.garage_id
 RegisterNUICallback('takeOut',     function(req, cb) cb({ ok = true, data = { netId = 0 } }) end) -- req.plate, req.garage_id
 ```
-Always call `cb(...)` with `{ ok, error?, data? }`; error codes are listed in `src/types/index.ts`.
+Send the `ui` locale table in `open`: `locale = UILocale()`. Always call `cb(...)` with `{ ok, error?, data? }`; error codes are listed in `src/types/index.ts`.
 
 ## fxmanifest
 ```lua

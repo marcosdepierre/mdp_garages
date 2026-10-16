@@ -1,24 +1,34 @@
 import type { NuiCallbacks, NuiEvent, NuiResponse } from '@/types';
 import { isInGame, resourceName } from './env';
-import { mockNui } from '@/dev/mock';
 
-/** POST to RegisterNUICallback(event). Browser mode → mock responses. */
+export const NUI_TIMEOUT_MS = 10_000;
+
+/** POST to RegisterNUICallback(event). 10 s timeout → {ok:false, error:'timeout'}. Browser dev → mocks. */
 export async function fetchNui<E extends NuiEvent>(event: E, data: NuiCallbacks[E]['req']): Promise<NuiResponse<NuiCallbacks[E]['res']>>;
 export async function fetchNui<T = unknown>(event: string, data?: unknown): Promise<NuiResponse<T>>;
 export async function fetchNui(event: string, data: unknown = {}): Promise<NuiResponse> {
   if (!isInGame) {
-    const res = await mockNui(event, data);
-    console.debug('[nui:mock]', event, data, '→', res);
-    return res;
+    if (import.meta.env.DEV) {
+      const { mockNui } = await import('@/dev/mock');
+      return mockNui(event, data);
+    }
+    return { ok: false, error: 'server_error' };
   }
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), NUI_TIMEOUT_MS);
   try {
     const resp = await fetch(`https://${resourceName}/${event}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json; charset=UTF-8' },
       body: JSON.stringify(data),
+      signal: ctrl.signal,
     });
-    return (await resp.json()) as NuiResponse;
-  } catch {
-    return { ok: false, error: 'server_error' };
+    if (!resp.ok) return { ok: false, error: 'server_error' };
+    const json = (await resp.json()) as NuiResponse;
+    return json && typeof json.ok === 'boolean' ? json : { ok: false, error: 'server_error' };
+  } catch (e) {
+    return { ok: false, error: (e as Error)?.name === 'AbortError' ? 'timeout' : 'server_error' };
+  } finally {
+    clearTimeout(timer);
   }
 }

@@ -1,17 +1,19 @@
+// DEV ONLY (excluded from production via import.meta.env.DEV). Exempt from the UUI-only rule per QC.
 import { Button } from '@/components/base/buttons/button';
 import { emitNui } from '@/nui/useNuiMessages';
-import { garages, mockOpen, vehicles } from './mock';
+import { garages, mockOpenMessage, vehicles } from './mock';
 
-/** Browser-only toolbar to simulate Lua messages. */
-export function DevToolbar() {
+export default function DevToolbar() {
   return (
-    <div className="fixed bottom-2 left-2 z-50 flex items-center gap-2 rounded-lg bg-primary/90 p-2 ring-1 ring-secondary">
-      <span className="text-xs font-semibold text-tertiary">DEV</span>
+    <div className="fixed bottom-2 left-2 z-[100] flex items-center gap-2 rounded-lg bg-primary/90 p-2 ring-1 ring-secondary">
       {garages.map((g) => (
-        <Button key={g.id} size="xs" color="secondary" onClick={() => emitNui({ action: 'open', view: 'list', data: mockOpen(g) })}>open {g.kind}</Button>
+        <Button key={g.id} size="xs" color="secondary" onClick={() => emitNui(mockOpenMessage(g))}>open {g.kind}</Button>
       ))}
-      <Button size="xs" color="secondary" onClick={() => emitNui({ action: 'open', view: 'detail', data: mockOpen() })}>open detail</Button>
+      <Button size="xs" color="secondary" onClick={() => emitNui(mockOpenMessage(garages[0], 'detail', vehicles[0].plate))}>detail</Button>
+      <Button size="xs" color="secondary" onClick={() => emitNui(mockOpenMessage(garages[0], 'detail'))}>detail (no plate)</Button>
       <Button size="xs" color="secondary" onClick={() => emitNui({ action: 'update', data: { vehicles: vehicles.slice(0, 2) } })}>update</Button>
+      <Button size="xs" color="secondary" onClick={() => emitNui({ action: 'update', data: { vehicles: [{ ...vehicles[0], plate: 'BAD 9', state: 9 as never }] } })}>unknown state</Button>
+      <Button size="xs" color="secondary" onClick={() => emitNui({ action: 'update', data: { vehicles: [] } })}>empty</Button>
       <Button size="xs" color="secondary-destructive" onClick={() => emitNui({ action: 'close' })}>close</Button>
     </div>
   );

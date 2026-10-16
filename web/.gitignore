@@ -1,4 +1,3 @@
 node_modules/
-_legacy/
 # dist/ is COMMITTED on purpose: FiveM loads web/dist directly, no build on server.
 *.tsbuildinfo
