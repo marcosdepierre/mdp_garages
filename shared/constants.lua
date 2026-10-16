@@ -31,7 +31,7 @@ Constants.VehicleTypes = { automobile = true, bike = true, boat = true, heli = t
 Constants.ErrorCodes = {}
 for _, c in ipairs({
     'invalid_request', 'invalid_garage', 'wrong_garage_kind', 'unknown_garage', 'wrong_garage', 'server_error',
-    'rejected', 'not_found', 'not_owner', 'too_far', 'rate_limited', 'locked',
+    'rejected', 'invalid_props', 'not_found', 'not_owner', 'too_far', 'rate_limited', 'locked',
     'already_out', 'retired', 'impounded', 'no_spawn', 'spawn_failed', 'unpaid_fines',
     'insufficient_funds', 'world_limit', 'external_invoice', 'not_ready', 'wrong_vehicle_type', 'plate_unresolved',
     'invalid_state', 'not_in_vehicle', 'clone_detected', 'not_tracked', 'invalid_source', 'already_paid',

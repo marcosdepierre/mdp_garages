@@ -5,6 +5,8 @@ Locales.en = {
     not_enough_money = 'You do not have enough money',
     no_access = 'You do not have access to this vehicle',
     too_far = 'You are too far away',
+    vehicle_stored = 'Vehicle stored',
+    prompt_garage = '[E] Garage',
     world_limit_player = 'You already have the maximum of %d vehicles parked on the street',
     world_limit_server = 'The city is full of parked vehicles, use a garage',
     fine_paid = 'Fine paid: $%d',
@@ -82,6 +84,7 @@ Locales.en = {
         err_fine_not_found = 'Fine not found or already paid',
         err_in_use = 'Someone is using this vehicle',
         err_vehicle_moved = 'This vehicle is no longer where it was parked',
+        err_invalid_props = 'Vehicle data was rejected by the server',
         err_occupied = 'Everyone else must leave the vehicle first (you must be the driver)',
     },
 }

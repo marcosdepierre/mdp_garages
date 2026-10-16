@@ -83,11 +83,12 @@ MDP.Callback('mdp_garages:takeOut', {
     local garage, gerr = Utils.GetGarage(data.garage_id, GARAGE_KINDS)
     if not garage then return { ok = false, error = gerr } end
     local plate = data.plate -- already normalized by ValidateSchema
-    local row = MySQL.single.await('SELECT model, vtype, props, state, garage_id, coords FROM mdp_vehicles WHERE plate = ?', { plate })
+    local row = MySQL.single.await('SELECT plate, model, vtype, props, state, garage_id, coords, fuel, engine, body, mileage FROM mdp_vehicles WHERE plate = ?', { plate })
     if not row or tonumber(row.state) == VS.REMOVED then return { ok = false, error = 'not_found' } end
     if tonumber(row.state) == VS.RETIRED then return { ok = false, error = 'retired' } end
     local state = tonumber(row.state)
-    -- QA N2 safety net (until the phase 1 proximity streamer): PARKED_WORLD can also be taken out from any garage
+    -- Kept in phase 1 as a feature ('bring my car'): PARKED_WORLD can be taken out from any garage (the streamer only
+    -- spawns it where it was parked; it does not move it to a garage)
     if state == VS.IMPOUNDED then return { ok = false, error = 'impounded' } end -- paid release: phase 5
     if state ~= VS.GARAGED and state ~= VS.PARKED_WORLD then return { ok = false, error = 'already_out' } end
     if state == VS.GARAGED and row.garage_id ~= data.garage_id then return { ok = false, error = 'wrong_garage' } end
@@ -116,6 +117,7 @@ MDP.Callback('mdp_garages:takeOut', {
             -- world-parked entity still alive: remove it first so only one exists
             Security.UntrackSpawn(plate)
             DeleteEntity(tracked)
+            MDP.Streamer.Forget(plate)
         end
         local spawn
         for _, s in ipairs(garage.spawns or {}) do if isSpawnFree(s) then spawn = s break end end
@@ -130,21 +132,15 @@ MDP.Callback('mdp_garages:takeOut', {
                 { VS.OUT, plate, VS.PARKED_WORLD })
         end
         if affected ~= 1 then return { ok = false, error = 'already_out' } end
-        local veh = CreateVehicleServerSetter(Utils.ModelHash(row.model), vtype, spawn.x, spawn.y, spawn.z, spawn.w)
-        local t = GetGameTimer() + 3000
-        while (not veh or veh == 0 or not DoesEntityExist(veh)) and GetGameTimer() < t do Wait(50) end
-        if not veh or veh == 0 or not DoesEntityExist(veh) then
+        row.vtype = vtype
+        local veh, netId = MDP.Props.SpawnVehicle(row, spawn.x, spawn.y, spawn.z, spawn.w, src)
+        if not veh then
             MySQL.update.await('UPDATE mdp_vehicles SET state = ?, garage_id = ? WHERE plate = ? AND state = ?',
                 { VS.GARAGED, data.garage_id, plate, VS.OUT })
             return { ok = false, error = 'spawn_failed' }
         end
-        SetVehicleNumberPlateText(veh, plate)
-        local ent = Entity(veh).state
-        ent:set('mdp_plate', plate, true)
-        if row.props then ent:set('mdp_props', row.props, true) end -- client applies props (phase 1)
-        local netId = NetworkGetNetworkIdFromEntity(veh)
-        Security.TrackSpawn(plate, netId, src)
-        -- Phase 1 (QA N6): give keys (Bridge.Keys GiveKeys), apply fuel/engine/body via state bag + client applier
+        MDP.Streamer.Forget(plate)
+        MDP.Props.GiveKeys(src, veh, plate) -- after the entity exists
         return { ok = true, data = { netId = netId } }
     end))
     local r = res[1]
@@ -182,7 +178,12 @@ end
 
 MDP.Callback('mdp_garages:storeVehicle', {
     rateLimit = { max = 1, windowMs = 1000 },
-    schema = { netId = Security.Int(1, 65535), garage_id = Security.V.isGarageId, vclass = Security.Optional(Security.Int(0, 22)) },
+    schema = {
+        netId = Security.Int(1, 65535), garage_id = Security.V.isGarageId, vclass = Security.Optional(Security.Int(0, 22)),
+        props = Security.Optional(function(v) return type(v) == 'table' end), -- lib.getVehicleProperties (sanitized below)
+        fuel = Security.Optional(function(v) return type(v) == 'number' and v == v end),
+        mileage = Security.Optional(function(v) return type(v) == 'number' and v == v and v >= 0 end), -- km
+    },
     resolvePlate = MDP.Vehicles.ResolvePlateFromNetId, -- server-side plate -> data._plate
     requireOwnership = true,              -- owner or key holder, checked on data._plate
     distance = { getCoords = garageCoords, max = Config.MaxGarageDistance },
@@ -193,7 +194,7 @@ MDP.Callback('mdp_garages:storeVehicle', {
     local _, _, veh = Security.PlateFromNetId(data.netId)
     if not veh then return { ok = false, error = 'invalid_request' } end
     if not Security.IsNear(src, GetEntityCoords(veh), Config.MaxVehicleDistance) then return { ok = false, error = 'too_far' } end
-    local row = MySQL.single.await('SELECT model, state FROM mdp_vehicles WHERE plate = ?', { plate })
+    local row = MySQL.single.await('SELECT plate, model, state, fuel, mileage FROM mdp_vehicles WHERE plate = ?', { plate })
     if not row then return { ok = false, error = 'not_owner' } end
     if tonumber(row.state) == VS.REMOVED then return { ok = false, error = 'not_found' } end
     if GetEntityModel(veh) ~= Utils.ModelHash(row.model) then return { ok = false, error = 'invalid_request' } end
@@ -218,14 +219,22 @@ MDP.Callback('mdp_garages:storeVehicle', {
     end
     local vtype = resolveVehicleType(veh, row.model, data.vclass)
     if not Utils.GarageAllowsType(garage, vtype) then return { ok = false, error = 'wrong_vehicle_type' } end
+    -- phase 1: props (Security.SanitizeProps), fuel (server adapter or clamped client value), mileage (never decreases)
+    local props, perr = MDP.Props.Sanitize(data.props, row, GetEntityModel(veh))
+    if perr then return { ok = false, error = 'invalid_props' } end
+    local fuel = MDP.Props.ResolveFuel(veh, data.fuel, row.fuel)
+    local mileage = MDP.Props.ResolveMileage(data.mileage, row.mileage)
+    local propsJson = props and json.encode(props) or nil
     local res = table.pack(Security.WithLock(plate, src, function()
         local affected = MySQL.update.await([[UPDATE mdp_vehicles
-            SET state = ?, garage_id = ?, vtype = ?, engine = ?, body = ?, coords = NULL, parked_at = NULL
+            SET state = ?, garage_id = ?, vtype = ?, engine = ?, body = ?, fuel = ?, mileage = ?, props = COALESCE(?, props),
+                coords = NULL, parked_at = NULL
             WHERE plate = ? AND state IN (?, ?)]],
-            { VS.GARAGED, data.garage_id, vtype, GetVehicleEngineHealth(veh), GetVehicleBodyHealth(veh),
+            { VS.GARAGED, data.garage_id, vtype, GetVehicleEngineHealth(veh), GetVehicleBodyHealth(veh), fuel, mileage, propsJson,
               plate, VS.OUT, VS.PARKED_WORLD })
         if affected ~= 1 then return { ok = false, error = 'invalid_state' } end
         Security.UntrackSpawn(plate)
+        MDP.Streamer.Forget(plate)
         DeleteEntity(veh)
         return { ok = true }
     end))

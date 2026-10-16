@@ -30,6 +30,8 @@ client_scripts {
     -- bridge/billing/*.lua is server-only (not sent to clients)
     'bridge/phone/*.lua',
     'client/main.lua',
+    'client/props.lua',
+    'client/zones.lua',
 }
 
 server_scripts {
@@ -48,6 +50,8 @@ server_scripts {
     'server/core.lua',
     'server/vehicles.lua',
     'server/persistence.lua',
+    'server/props.lua',
+    'server/streamer.lua',
     'server/garages.lua',
     'server/fines.lua',
     'server/fine_review*.lua', -- Integrations: /mdp_finereview (glob tolerates absence)

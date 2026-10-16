@@ -126,6 +126,9 @@ local function onStart()
                     if n == 1 then parked = parked + 1 end
                 end
             end
+        elseif st == VS.OUT and matches > 1 then
+            -- R6-1: ambiguous duplicates in the world -> keep OUT (never GARAGED, which would allow a third copy)
+            print(('^3[mdp_garages] restart: %s kept OUT (ambiguous world duplicates, needs review)^0'):format(plate))
         elseif st == VS.OUT then
             local n = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, garage_id = ?, coords = NULL WHERE plate = ? AND state = ?',
                 { VS.GARAGED, Config.DefaultGarage, plate, VS.OUT })
@@ -157,6 +160,7 @@ local function onStart()
     end
     -- 5) Accept callbacks only now (QA N4), then sync players already connected (resource restart, QA N7).
     MDP.Ready = true
+    pcall(MDP.Streamer.Refresh)
     print('[mdp_garages] ready')
     CreateThread(function() MDP.Vehicles.SyncConnectedPlayers() end)
 end
@@ -242,6 +246,7 @@ local function applyPolicy(plate, veh, mode, droppedPed)
         MySQL.update.await([[UPDATE mdp_vehicles SET state = ?, coords = ?, heading = ?, engine = ?, body = ?,
             parked_at = CURRENT_TIMESTAMP WHERE plate = ? AND state = ?]],
             { VS.PARKED_WORLD, json.encode({ x = c.x, y = c.y, z = c.z }), h, engine, body, plate, VS.OUT })
+        MDP.Streamer.Track(plate)
     end
 end
 

@@ -5,6 +5,8 @@ Locales.es = {
     not_enough_money = 'No tienes suficiente dinero',
     no_access = 'No tienes acceso a este vehículo',
     too_far = 'Estás demasiado lejos',
+    vehicle_stored = 'Vehículo guardado',
+    prompt_garage = '[E] Garaje',
     world_limit_player = 'Ya tienes el máximo de %d vehículos aparcados en la calle',
     world_limit_server = 'La ciudad está llena de vehículos aparcados, usa un garaje',
     fine_paid = 'Multa pagada: $%d',
@@ -82,6 +84,7 @@ Locales.es = {
         err_fine_not_found = 'Multa no encontrada o ya pagada',
         err_in_use = 'Alguien está usando este vehículo',
         err_vehicle_moved = 'Este vehículo ya no está donde se aparcó',
+        err_invalid_props = 'El servidor rechazó los datos del vehículo',
         err_occupied = 'Los demás deben bajarse del vehículo primero (debes ser el conductor)',
     },
 }

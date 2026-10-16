@@ -97,7 +97,9 @@ function Vehicles.InsertBatch(rows)
             -- R4-1: an imported OUT row without a live entity would be stuck -> GARAGED in its garage
             if r.state == VS.OUT and (not e or tonumber(e.state) == VS.REMOVED) then
                 worldPlates = worldPlates or Utils.WorldVehiclesByPlate()
-                if not Utils.UniqueWorldVehicle(worldPlates, r.plate, Utils.ModelHash(r.model)) then
+                -- R6-1: any match (one or ambiguous duplicates) keeps OUT; only zero matches -> GARAGED
+                local _, matches = Utils.UniqueWorldVehicle(worldPlates, r.plate, Utils.ModelHash(r.model))
+                if matches == 0 then
                     r.state = VS.GARAGED
                     r.garage_id = r.garage_id or Config.DefaultGarage
                 end
@@ -268,7 +270,9 @@ function Vehicles.AddVehicle(owner, plate, model, props, garageId)
             { initialState, owner, garageId, model, vtype, propsJson, plate, VS.REMOVED })
         if not okR then return false, 'db_error' end
         if n ~= 1 then return false, 'transfer_deferred' end
-        MySQL.update.await('DELETE FROM mdp_vehicle_keys WHERE plate = ?', { plate })
+        -- R6-2: key cleanup must not throw after the restore is done
+        local okK, errK = pcall(MySQL.update.await, 'DELETE FROM mdp_vehicle_keys WHERE plate = ?', { plate })
+        if not okK then print(('^1[mdp_garages] %s restored but clearing shared keys failed: %s^0'):format(plate, tostring(errK))) end
         print(('^3[mdp_garages] %s restored from REMOVED by AddVehicle for %s (was %s); shared keys cleared^0'):format(plate, owner, tostring(old)))
         local src = Vehicles.FindSourceByIdentifier and Vehicles.FindSourceByIdentifier(owner)
         if src then CreateThread(function() Vehicles.SyncPlayer(src, true) end) end

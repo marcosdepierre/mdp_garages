@@ -24,3 +24,19 @@ function Bridge.Fuel.Call(fnName, fallback, ...)
     end
     return fallback
 end
+
+-- Phase 1 API (Integrations contract). ServerCapable is true only for ox_fuel (state bag); guards when absent.
+if not Bridge.Fuel.ServerCapable then
+    function Bridge.Fuel.ServerCapable()
+        local FC = Bridge.FuelCommon
+        if not (FC and FC.ServerCapable) then return false end
+        local ok, res = pcall(FC.ServerCapable)
+        return ok and res == true
+    end
+end
+if not Bridge.Fuel.GetFuel then
+    function Bridge.Fuel.GetFuel(veh) return Bridge.Fuel.Call('GetFuel', nil, veh) end
+end
+if not Bridge.Fuel.SetFuel then
+    function Bridge.Fuel.SetFuel(veh, v) return Bridge.Fuel.Call('SetFuel', false, veh, v) end
+end
