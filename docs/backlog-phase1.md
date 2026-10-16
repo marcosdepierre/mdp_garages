@@ -137,3 +137,11 @@ Cerrados: P1-OWN-H1, P1-OWN-H2 (Altas, ver review), M2, M5 y L1. L3 parcial. Sig
 | P1-OWN-R2-L2 | Baja | server/vehicles.lua:99 (estado 3) | Vender un coche incautado: las multas se quedan con el vendedor (`mdp_fines.owner`) y el comprador recibe un coche en el depósito. `/mdp_regularize` mira las multas por `plate`, `takeOut` por `owner` (incoherente). **Decisión de Security.** | Bloquear la transferencia en el estado 3 o definir quién paga; unificar el criterio de multas. |
 | P1-OWN-R2-L3 | Baja | server/security.lua:712 | `Security.RegisterExternalVehicle(netId, plate, ownerSrc)` (8a4e3cf) es una segunda implementación que no se exporta. La que sí se exporta (garages.lua:≈640) no liga el dueño (M3 sigue abierto). | Una sola implementación con `ownerSrc` obligatorio. |
 | P1-OWN-R2-L4 | Baja | shared/config.lua:128 | `TrustedResources = {}` por defecto: los dos exports quedan desactivados hasta configurarlos (cambio incompatible para quien ya usaba `SpawnOwnedVehicle`). Ningún adaptador interno los llama. | Nota en las release notes (el mensaje de error ya explica cómo añadirlo). |
+
+## Desde QA frontend fase 1 R4 (16/10/2026, 6af6947)
+- **Cerrados:** P1F-R3-M1, P1F-R3-L1.
+- **Sigue abierto:** P1F-R2-L1 → se sigue como P1F-R4-L1.
+
+| # | Severidad | Archivo:línea | Descripción | Arreglo |
+|---|---|---|---|---|
+| P1F-R4-L1 | Baja | web/README.md:89-95, docs/release-notes.md:32-33, README.md | `ox:callbackTimeout` solo está en la guía de la NUI y contradice release-notes ("opcional, súbelo"); es un convar global de ox_lib. | Decidir recomendado u opcional y documentarlo en el README raíz (server.cfg) y en release-notes, coherente; corregir "súbelo" por "bájalo". |

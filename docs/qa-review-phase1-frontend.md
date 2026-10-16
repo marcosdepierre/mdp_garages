@@ -114,3 +114,30 @@ Revisión de 169cb30 (16/10/2026), con los cambios de Backend b17d813/f01f58d (s
 
 ### Veredicto R3
 R2-M1, R2-L2 y R2-L3 cerrados. R2-L4 cerrado con la reserva R3-L1. R2-L1 sigue abierto (falta documentarlo). Nueva Media P1F-R3-M1 (rechazos de Security en store/park se muestran como "Server error"). No hay Críticas ni Altas.
+
+## R4 — 6af6947
+Revisión de 6af6947 (16/10/2026) en un worktree limpio. Archivos: `client/zones.lua`, `web/tests/error-codes.e2e.mjs`, `web/README.md`. `web/dist` no cambia (no hay cambios en `web/src`).
+
+**Comprobaciones:**
+- `/tmp/luac54 -p client/zones.lua` → OK.
+- `npm run build` + `diff -r` contra `web/dist` → idénticos.
+- `npm run test:e2e` → todas las suites OK (error-codes, n16 7/7, phase1 15/15, r5 6/6).
+- Mutación de `error-codes.e2e.mjs`: borrar `err_occupied` en en.lua → FAIL (rc=1); en es.lua → FAIL; borrar `storing` en es.lua → FAIL; borrar `vehicle_parked` en en.lua → FAIL. ✅
+- Harness Lua 5.4 con el `guarded` real y los `shared/constants.lua` + `shared/utils.lua` reales:
+  - `false,'rate_limited'` → `rate_limited`; `false,'too_far'` → `too_far`; `false,'invalid_request'` → `invalid_request`. ✅
+  - `false,'plate_unresolved:nil'` y `{ok=false,error='plate_unresolved:nil'}` → `plate_unresolved`. ✅
+  - `false,'job_denied'` → `rejected`; `nil` → `server_error`. ✅
+- Sin regresiones: timeout a 15 s, bloqueo de 15 a 20 s, backstop a 20 s, el éxito tardío no toca el intento nuevo, el error tardío del mismo intento se muestra y `busy` siempre se libera. ✅
+
+**Estado:**
+- **P1F-R3-M1: cerrado.** `normalize(res, err)` (client/zones.lua:25-30) es igual que `serverCall`.
+- **P1F-R3-L1: cerrado.** El test comprueba las claves en en.lua y es.lua, incluidas las `titleKey`/`_L` del cliente.
+- **P1F-R2-L1: abierto.** Está documentado en `web/README.md:89-95`, pero un operador de servidor no lo va a buscar ahí (es la guía de la NUI para desarrolladores). Además contradice `docs/release-notes.md:32-33`, que dice que es **opcional** y que "se sube" con latencia alta. El default ya es 300 s, así que lo que hace falta es bajarlo. Y como el convar es global de ox_lib, bajarlo a 20 s afecta a los callbacks de otros recursos. Ver R4-L1.
+
+### Incidencias nuevas
+| # | Severidad | Archivo:línea | Descripción y repro | Arreglo propuesto |
+|---|---|---|---|---|
+| P1F-R4-L1 | Baja | web/README.md:89-95 ↔ docs/release-notes.md:32-33 (y README.md raíz) | La documentación de `ox:callbackTimeout` está en un sitio que el operador no va a mirar y se contradice: web/README dice "set 20000" y release-notes dice "opcional, súbelo si hay latencia". Repro: seguir la guía de instalación (README raíz + release-notes) → no se configura, y el backstop de 20 s deja reenviar mientras ox_lib sigue esperando (el servidor lo protege). | Una sola decisión, puesta en el README raíz (sección server.cfg) y en release-notes: o bien "recomendado `setr ox:callbackTimeout 20000`, global, revisa otros recursos", o bien "opcional, porque el servidor protege el doble envío", y quitar el párrafo de web/README o dejar ahí un enlace. Corregir "súbelo" por "bájalo". |
+
+### Veredicto R4
+R3-M1 y R3-L1 cerrados, sin regresiones. R2-L1 sigue abierto como documentación (R4-L1, Baja). No hay Críticas, Altas ni Medias abiertas en el frontend de fase 1.
