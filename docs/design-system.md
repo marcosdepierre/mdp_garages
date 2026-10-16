@@ -270,3 +270,200 @@ SVG: `docs/wireframes/garage-main.svg` (copia en `design/`).
 - Teclado: ↑/↓ cambia selección en la lista, Enter = acción principal, Esc = cerrar, Ctrl+F = foco en búsqueda.
 - Al abrir: selecciona el primer vehículo `stored`. Al sacar: `isLoading` en el botón → cierra NUI en éxito → toast success; en error toast error y panel abierto.
 - Textos vía `locales/` (es/en); no hardcodear cadenas.
+
+---
+
+# FASE 1 — Flujos, ficha de detalle, estados especiales
+
+> Actualización 16/10/2026 (fase 1). Alineado con la implementación real (`web/src/views/*`, `web/src/types`, `docs/architecture.md`). Donde esta sección y las §4–§5 difieran, **manda esta sección** (p. ej. la lista es una **Table** de UUI, no tarjetas: decisión N10).
+> Wireframes nuevos: `docs/wireframes/detail-states.svg` (ficha, depósito, retirado, vacíos) y `docs/wireframes/flows.svg` (sacar/guardar con todos los estados).
+
+## 7. Inventario de componentes Untitled UI (todos FREE)
+
+Verificado en el repo MIT `untitleduico/react` (commit `1d410cb`) y en `web/src/components/` del proyecto. Ningún componente PRO en fase 1.
+
+| Componente UUI | Import | Dónde | Props / variantes |
+|---|---|---|---|
+| **Table**, **TableCard** | `@/components/application/table/table` | lista de vehículos, sección Retirados, filas de datos de la ficha | `size="sm"`, `selectionMode="single"`, `selectionBehavior="replace"` (ver §12, R5-2) |
+| **Badge** | `@/components/base/badges/badges` | matrícula (`type="modern" color="gray"` + `font-mono`), mensaje de error inline (`type="pill-color" color="error" size="lg"`) | |
+| **BadgeWithDot** | idem | estado del vehículo, propietario/llavero | `type="pill-color"`, `size="sm"` en tabla, `"md"` en cabecera de ficha; color según §8.1 |
+| **ProgressBar / ProgressBarBase** | `@/components/base/progress-indicators/progress-indicators` | motor, carrocería, combustible | `value` 0–100, `progressClassName={statColor(n)}`, `className="h-2"` (ficha) / `"h-1"` (tabla), `aria-label` |
+| **Button** | `@/components/base/buttons/button` | Sacar, Guardar, Reintentar, Pagar, Cancelar, Cerrar | `color`: `primary` · `secondary` · `tertiary` · `primary-destructive`; `size`: `lg` (acción principal), `md` (modal), `sm` (inline); `isLoading`, `isDisabled`, `iconLeading/iconTrailing` |
+| **CloseButton** | `@/components/base/buttons/close-button` | cabecera panel, modal, toast | `size="sm"`/`"md"` |
+| **FeaturedIcon** | `@/components/foundations/featured-icon/featured-icon` | toasts, bloque info depósito/retirado, modal, EmptyState | `color`: `brand`·`gray`·`success`·`warning`·`error`; `theme`: `light` (ficha/modal), `dark` (toast); `size`: `sm` toast, `md` bloque info, `lg` modal |
+| **Modal** (`ModalOverlay` + `Modal` + `Dialog`) | `@/components/application/modals/modal` | pagar tasa de depósito | `isOpen`, `onOpenChange`, `isDismissable` (false mientras `busy`) |
+| **EmptyState** | `@/components/application/empty-state/empty-state` | garaje vacío, sin selección, búsqueda sin resultados, error de carga | `size="md"`, `Header pattern="circle"`, `FeaturedIcon color="gray"` (o `error` en fallo de carga) |
+| **Toast** | `sonner` (`<Toaster />`, `toast.custom`) + FeaturedIcon + CloseButton | resultados de sacar/guardar/pagar | ver §9.3. **"Notifications" de UUI es PRO → no se usa** |
+
+**PRO encontrados (no usar):** *Notifications* (→ sonner + FeaturedIcon) y *Alerts* (→ bloque info custom, §10). ⚠ `sonner` **no está aún en `web/package.json`**: Frontend debe añadirlo (`npm i sonner`, MIT, ~10 KB gzip).
+
+## 8. Ficha de detalle del vehículo
+
+```
+┌ TableCard.Root size="sm" ───────────────────────────────────────────────┐
+│ TableCard.Header  title="PEGASSI ZENTORNO" (font-display, uppercase)    │
+│                   badge=<BadgeWithDot pill-color md color=success>      │
+│                          Guardado                                       │
+├─────────────────────────────────────────────────────────────────────────┤
+│ MOTOR        92%   │ CARROCERÍA    73%   │ COMBUSTIBLE   41%            │
+│ ██████████████░    │ ███████████░░░░     │ ██████░░░░░░░ (ámbar)        │
+│ ProgressBarBase h-2 · progressClassName=statColor(n)                    │
+├─────────────────────────────────────────────────────────────────────────┤
+│ Table size="sm" (cabecera sr-only)                                      │
+│  Matrícula     [MDP 4821]  ← Badge modern gray font-mono                │
+│  Propietario   (● Propietario) ← BadgeWithDot brand | (● Llavero) gray  │
+│  Kilometraje   12.480 km   ← font-mono, Intl es-ES                      │
+│  Ubicación     Garaje Central (solo si llega garage/coords)             │
+├─────────────────────────────────────────────────────────────────────────┤
+│ [bloque info: error inline / depósito / retirado]  (§9.4, §10)          │
+│ hint deshabilitado (text-sm text-tertiary, id=takeout-hint)             │
+│ [        Sacar vehículo  ↵        ]  Button primary lg, flex-1          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.1 Badge de estado (`stateMeta`)
+| state | Clave locale | Texto es | `BadgeWithDot color` |
+|---|---|---|---|
+| 0 OUT | `state_out` | Fuera | `warning` |
+| 1 GARAGED | `state_garaged` | Guardado | `success` |
+| 2 PARKED_WORLD | `state_parked` | Aparcado | `gray` |
+| 3 IMPOUNDED | `state_impounded` | Embargado *(propuesta: "En depósito", más claro para el jugador)* | `error` |
+| 4 RETIRED | `state_retired` | Retirado | `gray` |
+| 5 REMOVED | — | nunca se muestra | — |
+
+### 8.2 Barras de estado
+- Orden fijo: **Motor · Carrocería · Combustible**. Motor/carrocería llegan 0–1000 → `clampPct(n, 10)`; combustible 0–100 → `clampPct(n)`.
+- Umbrales (`statColor`): **≥ 60** `bg-fg-success-primary` (verde `#22C55E`) · **30–59** `bg-fg-warning-primary` (ámbar `#EAB308`) · **< 30** `bg-fg-error-primary` (rojo `#EF4444`). Con < 30 el porcentaje también va en `text-error-primary`.
+- Maquetación: grid de 3 columnas (`grid-cols-3 gap-4 px-4 py-5`); etiqueta `text-xs font-semibold uppercase tracking-wider text-tertiary`, valor `font-mono text-sm`, barra `ProgressBarBase h-2` con `transition-[width] duration-500`.
+- **Decisión NUI-R4-3:** el bloque label + % + barra con `div/span` **se acepta** (es layout, la barra es UUI). No se cambia a `ProgressBar labelPosition="top-floating"`: el tooltip flotante tapa la barra en `h-2` y rompe el grid de 3 columnas.
+- Accesibilidad: `aria-label="Motor 92%"` en cada barra.
+
+### 8.3 Kilometraje
+- Formato **es-ES** con `Intl.NumberFormat('es-ES', { maximumFractionDigits: 0 })` + unidad: `12.480 km` / `7.755 mi`. Ojo: es-ES **no** pone separador de miles en números de 4 cifras (`1480 km`); usar `useGrouping: 'always'` para que salga `1.480 km`.
+- Unidad desde `v.mileage_unit` (`km` | `mi`, lo decide `Config.MileageUnit`), nunca hardcodeada.
+- Valor no numérico o ausente → `—` (no `0 km`).
+```ts
+const fmtKm = new Intl.NumberFormat('es-ES', { maximumFractionDigits: 0, useGrouping: 'always' });
+const mileage = Number.isFinite(+v.mileage) ? `${fmtKm.format(+v.mileage)} ${v.mileage_unit}` : '—';
+```
+(El locale del `Intl` debería venir del idioma activo; `es-ES` cuando `Config.Locale = 'es'`.)
+
+## 9. Flujos: sacar y guardar vehículo
+
+### 9.1 Sacar vehículo (NUI → `takeOut`)
+```mermaid
+stateDiagram-v2
+  [*] --> Idle
+  Idle --> Disabled: canTakeOut = false (estado ≠ 1/2, sin garage)
+  Idle --> Loading: click / Enter en "Sacar vehículo"
+  Loading --> Success: res.ok
+  Loading --> Error: res.ok = false | timeout 10 s
+  Success --> [*]: cerrar NUI + toast success
+  Error --> Loading: "Reintentar" (si el error es reintentable)
+  Error --> Idle: cambiar de vehículo / cerrar
+```
+| Estado | Botón principal | Resto de controles | Feedback |
+|---|---|---|---|
+| **Idle** | `Button primary lg` "Sacar vehículo" + `iconTrailing=CornerDownLeft` | todo activo | — |
+| **Disabled** | `isDisabled`, `aria-describedby="takeout-hint"` | activo | hint `text-sm text-tertiary` con `err_<motivo>` (`err_already_out`, `err_impounded`, `err_retired`, `err_invalid_garage`) |
+| **Loading** | `isLoading` (spinner UUI, mismo ancho, texto oculto) | **deshabilitados**: filas de la Table (`isDisabled` / `disabledKeys` = todas), búsqueda, CloseButton y Esc (se ignora hasta respuesta); cursor `progress` en el panel | sin toast |
+| **Success** | — | la NUI se cierra (`onTakenOut`) | toast **success**: FeaturedIcon `success` + "Vehículo sacado" + `label · plate` |
+| **Error** | vuelve a Idle (habilitado) y aparece "Reintentar" | se reactivan | toast **error** (FeaturedIcon `error`, `err_<code>`) **+** mensaje inline persistente sobre el botón (§9.4) |
+
+### 9.2 Guardar vehículo (en el coche, zona de garaje → `storeVehicle`)
+El guardado se lanza desde el mundo (tecla/target en la zona), no desde la lista. Diseño NUI mínimo: **sin abrir el panel completo**; solo toasts. Si el panel ya está abierto y el jugador está en un vehículo en la zona, la cabecera muestra `Button secondary md` "Guardar vehículo" (`iconLeading=Download01`).
+```
+ [Idle]  jugador conductor en zona ──(tecla E / botón "Guardar vehículo")──► [Loading]
+ [Loading] toast.loading "Guardando…" (FeaturedIcon brand + spinner) | botón isLoading | Esc ignorado
+     ├─ ok ──► [Success] toast.success "Vehículo guardado · Buffalo STX · LSPD 019"  (sustituye al loading, mismo id)
+     └─ err ─► [Error]   toast.error err_<code>  + acción "Reintentar" en el toast (solo códigos reintentables)
+                          si el panel está abierto: además mensaje inline bajo la cabecera
+```
+Errores típicos y texto: `not_in_vehicle`, `occupied` ("Bájate los pasajeros"), `too_far`, `wrong_vehicle_type`, `not_owner`, `clone_detected`, `rate_limited`, `timeout`.
+
+### 9.3 Toasts (sonner + FeaturedIcon)
+`<Toaster position="top-right" theme="dark" visibleToasts={3} offset={24} />` montado fuera del contenedor escalado (escala propia con `--app-scale`, `transform-origin: top right`).
+| Tipo | FeaturedIcon | Icono | Duración | Uso |
+|---|---|---|---|---|
+| success | `color="success" theme="dark" size="sm"` | `CheckCircle` | 4 s | sacado, guardado, pagado |
+| error | `color="error"` | `AlertCircle` | 6 s | cualquier `err_<code>` |
+| warning | `color="warning"` | `AlertTriangle` | 5 s | avisos (p. ej. combustible < 10 %) |
+| info / loading | `color="brand"` | `InfoCircle` / spinner | hasta resolver | "Guardando…" |
+Estructura: `div.flex.w-85.items-start.gap-3.rounded-xl.bg-secondary.p-4.shadow-lg.ring-1.ring-secondary` → FeaturedIcon · (título `text-sm font-semibold text-primary` + descripción `text-sm text-tertiary` + opcional `Button tertiary sm` "Reintentar") · `CloseButton size="sm"`. `role="status"` (success/info) o `role="alert"` (error).
+
+### 9.4 Mensaje de error inline + reintento
+Sustituye el `Badge` de error actual (fase 0) por un bloque más legible (Alerts es PRO → custom):
+```tsx
+<div role="alert" className="mx-4 mt-4 flex items-start gap-3 rounded-xl bg-error-primary p-3 ring-1 ring-error_subtle">
+  <FeaturedIcon icon={AlertCircle} color="error" theme="light" size="sm" />
+  <p className="flex-1 text-sm text-error-primary">{t(errorKey(error))}</p>
+  {retryable && <Button color="secondary" size="sm" iconLeading={RefreshCw01} onClick={takeOut}>{t('retry')}</Button>}
+</div>
+```
+- **Reintentables:** `timeout`, `server_error`, `rate_limited` (reactivar tras 1 s), `no_spawn`, `spawn_failed`, `locked`, `in_use`, `vehicle_moved`.
+- **No reintentables** (sin botón, solo explicación): `not_owner`, `impounded`, `retired`, `already_out`, `wrong_vehicle_type`, `insufficient_funds`, `invalid_*`, etc.
+- Se limpia al cambiar de vehículo o al reintentar. Nueva clave de locale necesaria: **`retry`** ("Reintentar"/"Retry") — avisar a Frontend/Lua.
+
+## 10. Vehículo en depósito (state 3) y retirado (state 4)
+
+### 10.1 En depósito / embargado
+- **Lista:** fila normal, `BadgeWithDot color="error"`; seleccionable (para ver la ficha).
+- **Ficha:** "Sacar vehículo" **oculto** en garajes `public/private`; en su lugar bloque info + acción alternativa:
+```
+┌ div rounded-xl bg-error-primary ring-1 ring-error_subtle p-4 ───────────┐
+│ (⚠) FeaturedIcon error md   Vehículo en depósito                       │
+│     Motivo: {impound.reason}                                            │
+│     Tasa de depósito: 2.500 $   ·  Disponible desde: 17/10 18:00        │
+│     (release_after null → "Disponible ya")                              │
+└─────────────────────────────────────────────────────────────────────────┘
+ garaje public/private →  [ Ver depósito en GPS ]  Button secondary lg  (fase 5: waypoint)
+ garaje impound:*      →  [ Pagar y recuperar (2.500 $) ]  Button primary-destructive lg → Modal
+                          isDisabled + hint si release_after > ahora ("Disponible desde …")
+```
+- Importes: `Intl.NumberFormat('es-ES', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })` → `2.500 US$`; o mejor número + símbolo del servidor (`2.500 $`). El importe es **solo display** (`garage.fee` / `impound.fee`); el servidor recalcula.
+
+### 10.2 Modal "Pagar tasa de depósito" (fase 5, `releaseImpound`)
+```tsx
+<ModalOverlay isOpen={open} onOpenChange={setOpen} isDismissable={!busy}>
+  <Modal><Dialog>
+    <div className="w-full max-w-100 rounded-2xl bg-primary p-6 shadow-xl ring-1 ring-secondary">
+      <div className="flex items-start justify-between">
+        <FeaturedIcon icon={Bank} color="warning" theme="light" size="lg" />
+        <CloseButton size="md" isDisabled={busy} onClick={() => setOpen(false)} />
+      </div>
+      <h2 className="mt-4 text-lg font-semibold text-primary">{t('impound_pay_title')}</h2>        {/* "Recuperar del depósito" */}
+      <p className="mt-1 text-sm text-tertiary">{label} · {plate}</p>
+      <dl className="mt-4 rounded-lg bg-secondary p-3 text-sm"> Tasa: <b className="font-mono">2.500 $</b> · Pago: banco </dl>
+      {error && /* bloque inline §9.4 */}
+      <div className="mt-6 flex gap-3">
+        <Button color="secondary" size="lg" className="flex-1" isDisabled={busy} onClick={close}>{t('cancel')}</Button>
+        <Button color="primary" size="lg" className="flex-1" isLoading={busy} onClick={pay}>{t('impound_pay')}</Button>
+      </div>
+    </div>
+  </Dialog></Modal>
+</ModalOverlay>
+```
+Estados: idle → loading (`isLoading` en Pagar, Cancelar/Close deshabilitados, no se cierra con Esc/clic fuera) → success (cierra modal + toast success "Vehículo recuperado", estado pasa a Guardado en la lista) → error (inline en el modal; `insufficient_funds` sin reintento, `timeout/server_error` con reintento). Claves nuevas: `impound_pay_title`, `impound_pay`, `cancel`.
+
+### 10.3 Retirado (state 4, fase 7)
+- Sección propia **"Retirados"** (`retired_section`) debajo de la tabla principal: `TableCard` con su propia `Table` en `selectionMode="none"` (no abre ficha), filas con `opacity-70`, `BadgeWithDot color="gray"`.
+- Encima de la tabla, línea de ayuda con FeaturedIcon `gray sm` + `retired_hint` ("Recupéralo desde la app del teléfono").
+- Sin botón de sacar. No cuentan en el contador de la cabecera (N12).
+- Si por cualquier vía llega a la ficha: bloque info gris (`bg-secondary ring-secondary`, FeaturedIcon `gray` `Phone01`) con `err_retired` y botón oculto.
+
+## 11. Estados vacíos (EmptyState)
+| Caso | FeaturedIcon | Título (clave) | Descripción | Footer |
+|---|---|---|---|---|
+| Garaje sin vehículos | `gray`, `Car01` | `empty` "No hay vehículos aquí" | "Guarda un vehículo cerca del punto para verlo aquí." | `Button secondary md` Cerrar |
+| Sin selección (panel detalle) | `gray`, `Car01` | `select_vehicle` | — | — |
+| Búsqueda sin resultados | `gray`, `SearchLg` | "Sin resultados para «xyz»" | — | `Button tertiary sm` "Limpiar búsqueda" |
+| Depósito sin vehículos | `gray`, `CheckCircle` | "No tienes vehículos en el depósito" | — | Cerrar |
+| Error al cargar (`getVehicles` falla/timeout) | `error`, `AlertCircle` | `error` | `err_<code>` | `Button primary md` Reintentar · `secondary` Cerrar |
+| Cargando | — (no EmptyState) | `LoadingIndicator` UUI (FREE; añadir con `npx untitledui@latest add loading-indicator`, aún no está en web/src) `type="line-spinner" size="md"` + `loading` | | |
+Todos: `EmptyState size="md"`, `Header pattern="circle"`, centrados en el área que sustituyen.
+
+## 12. Decisiones de diseño del backlog fase 1
+- **NUI-R5-2 (selección con flechas):** se **confirma `selectionBehavior="replace"`**: mover con ↑/↓ y ver la ficha al instante es lo esperado en un garaje (vista previa rápida). Para evitar coste de render, la ficha no debe animar al cambiar (sin `duration-500` en las barras cuando cambia la placa: aplicar la transición solo cuando el mismo vehículo actualiza valores) y se puede envolver `DetailView` en `memo` por `plate`. No pasar a `toggle` + Enter.
+- **NUI-R4-3 (bloque de stats):** aceptado tal cual (§8.2).
+- **NUI-R4-4 (color-scheme solo en el panel):** criterio visual para la comprobación en juego: alrededor del panel debe verse el mundo **sin velo ni tinte** (ni negro ni blanco); el único fondo opaco es `bg-primary` del contenedor `rounded-2xl`; los toasts flotan sin fondo de página. Si aparece un fondo, revisar `html, body, #root { background: transparent }` (tokens.css) y que `color-scheme: dark` esté solo en el contenedor. Wireframe `garage-main.svg` muestra la escena de fondo como referencia.
+- **NUI-R4-1, R4-2, R5-1, R6-1, R6-2:** no son de diseño (bundle, limpieza de código, tests, servidor). Sin cambios aquí.

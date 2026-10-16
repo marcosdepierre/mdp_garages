@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1040" viewBox="0 0 1920 1040" font-family="Inter, Segoe UI, Arial, sans-serif">
+<title>mdp_garages — Flujos sacar/guardar (fase 1)</title>
+<style>.t1{fill:#FAFAFA}.t2{fill:#D4D4D4}.t3{fill:#A1A1A1}.a{fill:#84B2FF;font-size:12px;font-family:Consolas,monospace}.h{font-family:Rajdhani,Inter,sans-serif;font-weight:700}</style>
+<rect width="1920" height="1040" fill="#3a4250"/>
+<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#84B2FF"/></marker></defs>
+<text x="40" y="60" class="t1 h" font-size="24" >SACAR VEHÍCULO (NUI → takeOut)</text>
+<rect x="40" y="80" width="380" height="76" rx="12" fill="#0A0A0A" stroke="#404040" stroke-width="2"/>
+<text x="56" y="106" class="" font-size="16" fill="#D4D4D4" font-weight="700">IDLE</text>
+<text x="56" y="128" class="t2" font-size="12" >Button primary lg “Sacar vehículo ↵”</text>
+<text x="56" y="146" class="t2" font-size="12" >Disabled: isDisabled + hint err_*</text>
+<rect x="520" y="80" width="380" height="76" rx="12" fill="#0A0A0A" stroke="#1848CC" stroke-width="2"/>
+<text x="536" y="106" class="" font-size="16" fill="#84B2FF" font-weight="700">LOADING</text>
+<text x="536" y="128" class="t2" font-size="12" >Button isLoading</text>
+<text x="536" y="146" class="t2" font-size="12" >Table rows, búsqueda, ✕, Esc: off</text>
+<rect x="1000" y="40" width="420" height="94" rx="12" fill="#0A0A0A" stroke="#166534" stroke-width="2"/>
+<text x="1016" y="66" class="" font-size="16" fill="#4ADE80" font-weight="700">SUCCESS</text>
+<text x="1016" y="88" class="t2" font-size="12" >NUI se cierra</text>
+<text x="1016" y="106" class="t2" font-size="12" >toast success: FeaturedIcon success</text>
+<text x="1016" y="124" class="t2" font-size="12" >“Vehículo sacado · label · plate”</text>
+<rect x="1000" y="200" width="420" height="94" rx="12" fill="#0A0A0A" stroke="#991b1b" stroke-width="2"/>
+<text x="1016" y="226" class="" font-size="16" fill="#F87171" font-weight="700">ERROR</text>
+<text x="1016" y="248" class="t2" font-size="12" >toast error (FeaturedIcon error)</text>
+<text x="1016" y="266" class="t2" font-size="12" >+ bloque inline role=alert</text>
+<text x="1016" y="284" class="t2" font-size="12" >+ Button secondary sm “Reintentar”</text>
+<line x1="420" y1="120" x2="518" y2="120" stroke="#84B2FF" stroke-width="2" marker-end="url(#ar)"/><text x="475.0" y="114.0" class="a" font-size="12" >click/Enter</text>
+<line x1="900" y1="110" x2="998" y2="80" stroke="#84B2FF" stroke-width="2" marker-end="url(#ar)"/><text x="955.0" y="89.0" class="a" font-size="12" >ok</text>
+<line x1="900" y1="140" x2="998" y2="220" stroke="#84B2FF" stroke-width="2" marker-end="url(#ar)"/><text x="955.0" y="174.0" class="a" font-size="12" >error/timeout 10 s</text>
+<path d="M1210,294 C1210,380 710,380 710,182" fill="none" stroke="#84B2FF" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#ar)"/><text x="860" y="370" class="a" font-size="12" >Reintentar</text>
+<text x="40" y="540" class="t1 h" font-size="24" >GUARDAR VEHÍCULO (mundo → storeVehicle)</text>
+<rect x="40" y="560" width="380" height="76" rx="12" fill="#0A0A0A" stroke="#404040" stroke-width="2"/>
+<text x="56" y="586" class="" font-size="16" fill="#D4D4D4" font-weight="700">IDLE</text>
+<text x="56" y="608" class="t2" font-size="12" >Conductor solo, en zona de garaje</text>
+<text x="56" y="626" class="t2" font-size="12" >Tecla E / Button secondary “Guardar”</text>
+<rect x="520" y="560" width="380" height="76" rx="12" fill="#0A0A0A" stroke="#1848CC" stroke-width="2"/>
+<text x="536" y="586" class="" font-size="16" fill="#84B2FF" font-weight="700">LOADING</text>
+<text x="536" y="608" class="t2" font-size="12" >toast.loading “Guardando…”</text>
+<text x="536" y="626" class="t2" font-size="12" >FeaturedIcon brand · botón isLoading</text>
+<rect x="1000" y="520" width="420" height="94" rx="12" fill="#0A0A0A" stroke="#166534" stroke-width="2"/>
+<text x="1016" y="546" class="" font-size="16" fill="#4ADE80" font-weight="700">SUCCESS</text>
+<text x="1016" y="568" class="t2" font-size="12" >toast.success (mismo id)</text>
+<text x="1016" y="586" class="t2" font-size="12" >“Vehículo guardado · label · plate”</text>
+<text x="1016" y="604" class="t2" font-size="12" >entidad eliminada</text>
+<rect x="1000" y="680" width="420" height="94" rx="12" fill="#0A0A0A" stroke="#991b1b" stroke-width="2"/>
+<text x="1016" y="706" class="" font-size="16" fill="#F87171" font-weight="700">ERROR</text>
+<text x="1016" y="728" class="t2" font-size="12" >toast.error err_&lt;code&gt;</text>
+<text x="1016" y="746" class="t2" font-size="12" >acción “Reintentar” si reintentable</text>
+<text x="1016" y="764" class="t2" font-size="12" >(occupied, too_far, not_in_vehicle…)</text>
+<line x1="420" y1="600" x2="518" y2="600" stroke="#84B2FF" stroke-width="2" marker-end="url(#ar)"/><text x="475.0" y="594.0" class="a" font-size="12" >click/Enter</text>
+<line x1="900" y1="590" x2="998" y2="560" stroke="#84B2FF" stroke-width="2" marker-end="url(#ar)"/><text x="955.0" y="569.0" class="a" font-size="12" >ok</text>
+<line x1="900" y1="620" x2="998" y2="700" stroke="#84B2FF" stroke-width="2" marker-end="url(#ar)"/><text x="955.0" y="654.0" class="a" font-size="12" >error/timeout 10 s</text>
+<path d="M1210,774 C1210,860 710,860 710,662" fill="none" stroke="#84B2FF" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#ar)"/><text x="860" y="850" class="a" font-size="12" >Reintentar</text>
+<text x="40" y="906" class="a" font-size="13" >Toasts (sonner + FeaturedIcon + CloseButton) — Notifications de UUI es PRO</text>
+<rect x="40" y="920" width="440" height="72" rx="12" fill="#171717" stroke="#262626" />
+<circle cx="72" cy="956" r="14" fill="#052e16" stroke="#166534"/><text x="66" y="961" class="" font-size="14" fill="#4ADE80">✓</text>
+<text x="100" y="952" class="t1" font-size="14" font-weight="600">Vehículo guardado</text>
+<text x="100" y="974" class="t3" font-size="12" >Buffalo STX · LSPD 019</text>
+<text x="454" y="950" class="t3" font-size="13" >✕</text>
+<rect x="500" y="920" width="440" height="72" rx="12" fill="#171717" stroke="#262626" />
+<circle cx="532" cy="956" r="14" fill="#450a0a" stroke="#991b1b"/><text x="526" y="961" class="" font-size="14" fill="#F87171">!</text>
+<text x="560" y="952" class="t1" font-size="14" font-weight="600">No se pudo sacar</text>
+<text x="560" y="974" class="t3" font-size="12" >Tiempo de espera agotado · Reintentar</text>
+<text x="914" y="950" class="t3" font-size="13" >✕</text>
+<rect x="960" y="920" width="440" height="72" rx="12" fill="#171717" stroke="#262626" />
+<circle cx="992" cy="956" r="14" fill="#422006" stroke="#854d0e"/><text x="986" y="961" class="" font-size="14" fill="#FACC15">!</text>
+<text x="1020" y="952" class="t1" font-size="14" font-weight="600">Combustible bajo</text>
+<text x="1020" y="974" class="t3" font-size="12" >Quedan 8 %</text>
+<text x="1374" y="950" class="t3" font-size="13" >✕</text>
+<rect x="1420" y="920" width="440" height="72" rx="12" fill="#171717" stroke="#262626" />
+<circle cx="1452" cy="956" r="14" fill="#101F4F" stroke="#1848CC"/><text x="1446" y="961" class="" font-size="14" fill="#84B2FF">i</text>
+<text x="1480" y="952" class="t1" font-size="14" font-weight="600">Guardando…</text>
+<text x="1480" y="974" class="t3" font-size="12" >Buffalo STX</text>
+<text x="1834" y="950" class="t3" font-size="13" >✕</text>
+</svg>
