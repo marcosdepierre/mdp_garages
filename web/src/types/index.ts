@@ -58,7 +58,8 @@ export type ToastKind = 'loading' | 'success' | 'error' | 'warning' | 'info';
 
 // NUI → Lua
 export const NUI_ERROR_CODES = [
-  'invalid_request', 'invalid_garage', 'wrong_garage_kind', 'unknown_garage', 'wrong_garage', 'server_error', 'rejected', 'not_found', 'not_owner', 'too_far', 'rate_limited', 'locked', 'already_out', 'retired', 'impounded', 'no_spawn', 'spawn_failed', 'unpaid_fines', 'insufficient_funds', 'world_limit', 'external_invoice', 'not_ready', 'wrong_vehicle_type', 'plate_unresolved', 'invalid_state', 'not_in_vehicle', 'clone_detected', 'not_tracked', 'invalid_source', 'already_paid', 'invalid_amount', 'fine_not_found', 'in_use', 'vehicle_moved', 'occupied', 'invalid_props', 'not_owned_vehicle', 'vehicle_mismatch',
+  // same order as shared/constants.lua Constants.ErrorCodes
+  'invalid_request', 'invalid_garage', 'wrong_garage_kind', 'unknown_garage', 'wrong_garage', 'server_error', 'rejected', 'invalid_props', 'not_owned_vehicle', 'vehicle_mismatch', 'duplicate_plate', 'not_found', 'not_owner', 'too_far', 'rate_limited', 'locked', 'already_out', 'retired', 'impounded', 'no_spawn', 'spawn_failed', 'unpaid_fines', 'insufficient_funds', 'world_limit', 'external_invoice', 'not_ready', 'wrong_vehicle_type', 'plate_unresolved', 'invalid_state', 'not_in_vehicle', 'clone_detected', 'not_tracked', 'invalid_source', 'already_paid', 'invalid_amount', 'fine_not_found', 'in_use', 'vehicle_moved', 'occupied',
   /** UI-only: fetchNui got no answer within 10 s. */
   'timeout',
 ] as const;

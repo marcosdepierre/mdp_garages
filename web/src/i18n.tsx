@@ -45,6 +45,7 @@ export const EN: LocaleTable = {
   err_not_owner: "This vehicle is not yours",
   err_not_owned_vehicle: "You can only store your own vehicles",
   err_vehicle_mismatch: "This is not the registered vehicle",
+  err_duplicate_plate: "This plate is registered more than once; contact an admin",
   err_too_far: "You are too far away",
   err_rate_limited: "Please wait a moment and try again",
   err_locked: "This vehicle is busy, try again",
