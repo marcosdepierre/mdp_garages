@@ -118,11 +118,14 @@ On start, vehicles left OUT are reconciled with the world. If an entity with the
 
 ## Optional server.cfg hardening
 ```
+setr ox:callbackTimeout 20000                           # optional, ox_lib (global), see below
 set mdp_garages_entity_secret "<long random string>"   # secret for the server-entity tag used to adopt vehicles after restarts
 set sv_entityLockdown relaxed                           # or strict
 set sv_filterRequestControl 2
 ```
 See docs/architecture.md (Phase 1 security re-review) and docs/security.md.
+
+`ox:callbackTimeout` is an ox_lib convar read with `GetConvarInt('ox:callbackTimeout', 300000)` in ox_lib's `imports/callback` (checked in its source): default **300000 ms (5 min)**, global for every resource using `lib.callback`. It is optional for mdp_garages. Raising it does not help slow databases (5 min is already far above any store/park); the client already stops waiting on its own after ~20 s. Lowering it to `20000` or less makes ox_lib give up at the same time as our client backstop, so a late answer can't overlap a resend (the server is protected anyway by the plate lock, conditional UPDATEs and rate limits). Check other resources before lowering it.
 
 ## Release notes / upgrading
 - **a8fda43 (phase 1, server entity mark):** vehicles spawned before this version carry no server mark. On the **first restart after updating**, such entities can't be adopted: if empty they are **deleted** (parked cars are respawned by the streamer from the DB, nothing is lost); if **occupied** they are **ignored** and their DB row stays OUT, so the owner can store them normally (no duplicate, P1R3-H1).

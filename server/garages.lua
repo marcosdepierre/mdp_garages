@@ -85,10 +85,12 @@ end
 
 --- P1-OWN-H2/AD-4: any live entity carrying this plate (pool scan), excluding `except`. Returns 'already_out' for a
 --- server-marked one, 'vehicle_mismatch' for an unmarked one, nil if none.
-local function liveEntityConflict(plate, except)
+--- R2-M1: for a GARAGED row unmarked plate clones are ignored (anyone can clone a plate to grief the owner).
+local function liveEntityConflict(plate, except, ignoreUnmarked)
     for _, ent in ipairs(GetAllVehicles()) do
         if ent ~= except and Utils.NormalizePlate(GetVehicleNumberPlateText(ent) or '') == plate then
-            return Security.IsServerEntity(ent, plate) and 'already_out' or 'vehicle_mismatch'
+            if Security.IsServerEntity(ent, plate) then return 'already_out' end
+            if not ignoreUnmarked then return 'vehicle_mismatch' end
         end
     end
     return nil
@@ -117,6 +119,8 @@ MDP.Callback('mdp_garages:takeOut', {
         local vtype = Utils.IsValidVehicleType(row.vtype) and row.vtype or 'automobile'
         if not Utils.GarageAllowsType(garage, vtype) then return { ok = false, error = 'wrong_vehicle_type' } end
         if unpaidFinesBlocked(row.owner) then return { ok = false, error = 'unpaid_fines' } end
+        -- TR-1: ownership re-checked inside the lock (a transfer may have happened since the pre-lock check)
+        if not Security.IsOwner(src, plate, true) then return { ok = false, error = 'not_owner' } end
         local tracked = Security.GetSpawnedEntity(plate)
         if tracked then
             if state ~= VS.PARKED_WORLD then return { ok = false, error = 'already_out' } end
@@ -127,7 +131,7 @@ MDP.Callback('mdp_garages:takeOut', {
             end
         end
         -- P1-OWN-H2: never spawn while another live entity carries the plate (the tracked parked one is handled above)
-        local conflict = liveEntityConflict(plate, tracked)
+        local conflict = liveEntityConflict(plate, tracked, state == VS.GARAGED)
         if conflict then return { ok = false, error = conflict } end
         local spawn
         for _, sp in ipairs(garage.spawns or {}) do if isSpawnFree(sp) then spawn = sp break end end
@@ -135,13 +139,13 @@ MDP.Callback('mdp_garages:takeOut', {
         -- conditional transition on the state we read; affectedRows checked
         local affected
         if state == VS.GARAGED then
-            affected = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, parked_at = NULL WHERE plate = ? AND state = ? AND garage_id = ?',
-                { VS.OUT, plate, VS.GARAGED, data.garage_id })
+            affected = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, parked_at = NULL WHERE plate = ? AND state = ? AND garage_id = ? AND owner = ?',
+                { VS.OUT, plate, VS.GARAGED, data.garage_id, row.owner })
         else
-            affected = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, parked_at = NULL WHERE plate = ? AND state = ?',
-                { VS.OUT, plate, VS.PARKED_WORLD })
+            affected = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, parked_at = NULL WHERE plate = ? AND state = ? AND owner = ?',
+                { VS.OUT, plate, VS.PARKED_WORLD, row.owner })
         end
-        if affected ~= 1 then return { ok = false, error = 'already_out' } end
+        if affected ~= 1 then return { ok = false, error = 'not_owner' } end -- TR-1: owner (or state) changed
         -- M1: the old world entity is deleted only after the UPDATE succeeded
         if tracked then
             Security.UntrackSpawn(plate)
@@ -362,7 +366,7 @@ local function lockedOwnVehicle(src, ent, plate, evName, isStore)
         local fwOwner = MDP.Vehicles.FrameworkOwner(plate)
         if fwOwner and fwOwner ~= row.owner then
             Security.LogReject(src, evName, 'framework_owner_mismatch', { plate = plate })
-            MDP.Vehicles.ApplyTransfer(plate, row.owner, fwOwner)
+            MDP.Vehicles.ApplyTransfer(plate, row.owner, fwOwner, true) -- we already hold the plate lock
             return nil, 'not_owner'
         end
     end
@@ -425,9 +429,9 @@ MDP.Callback('mdp_garages:storeVehicle', {
         local affected = MySQL.update.await([[UPDATE mdp_vehicles
             SET state = ?, garage_id = ?, vtype = ?, engine = ?, body = ?, fuel = ?, mileage = ?, props = COALESCE(?, props),
                 coords = NULL, parked_at = NULL, managed_at = COALESCE(managed_at, NOW())
-            WHERE plate = ? AND state = ?]],
-            { VS.GARAGED, data.garage_id, vtype, engine, body, fuel, mileage, propsJson, plate, VS.OUT })
-        if affected ~= 1 then return { ok = false, error = 'invalid_state' } end
+            WHERE plate = ? AND state = ? AND owner = ?]],
+            { VS.GARAGED, data.garage_id, vtype, engine, body, fuel, mileage, propsJson, plate, VS.OUT, row.owner })
+        if affected ~= 1 then return { ok = false, error = 'not_owner' } end -- TR-1
         Security.UntrackSpawn(plate)
         MDP.Props.ForgetMileage(plate) -- N7: garaged; next spawn stamps again
         MDP.Streamer.Forget(plate)
@@ -500,9 +504,9 @@ MDP.Callback('mdp_garages:parkWorld', {
         local engine, body = MDP.Props.Health('engine', GetVehicleEngineHealth(veh)), MDP.Props.Health('body', GetVehicleBodyHealth(veh))
         local n = MySQL.update.await([[UPDATE mdp_vehicles SET state = ?, coords = ?, heading = ?, engine = ?, body = ?, fuel = ?,
             mileage = ?, props = COALESCE(?, props), parked_at = CURRENT_TIMESTAMP, managed_at = COALESCE(managed_at, NOW())
-            WHERE plate = ? AND state = ?]],
-            { VS.PARKED_WORLD, json.encode({ x = c.x, y = c.y, z = c.z }), h, engine, body, fuel, mileage, propsJson, plate, VS.OUT })
-        if n ~= 1 then return { ok = false, error = 'invalid_state' } end
+            WHERE plate = ? AND state = ? AND owner = ?]],
+            { VS.PARKED_WORLD, json.encode({ x = c.x, y = c.y, z = c.z }), h, engine, body, fuel, mileage, propsJson, plate, VS.OUT, row.owner })
+        if n ~= 1 then return { ok = false, error = 'not_owner' } end -- TR-1
         SetVehicleDoorsLocked(veh, 2)
         MDP.Props.StampMileage(plate)
         MDP.Streamer.Track(plate) -- the streamer now owns it
@@ -529,7 +533,8 @@ RegisterCommand('mdp_regularize', function(src, args)
         -- M2: never a way out of the impound / retirement or around unpaid fines
         local st = tonumber(row.state)
         if st == VS.IMPOUNDED or st == VS.RETIRED then return reply(('%s is impounded/retired (state %d): release it the normal way'):format(plate, st)) end
-        local fines = MySQL.scalar.await("SELECT COUNT(*) FROM mdp_fines WHERE plate = ? AND paid = 0 AND channel IN ('internal', 'invoice')", { plate }) or 0
+        -- fines belong to whoever committed them: only the CURRENT owner's unpaid fines on this plate block it
+        local fines = MySQL.scalar.await("SELECT COUNT(*) FROM mdp_fines WHERE plate = ? AND owner = (SELECT owner FROM mdp_vehicles WHERE plate = ?) AND paid = 0 AND channel IN ('internal', 'invoice')", { plate, plate }) or 0
         if fines > 0 then return reply(('%s has %d unpaid fine(s): refused'):format(plate, fines)) end
         local tracked = Security.GetSpawnedEntity(plate)
         local deleted = 0
@@ -605,12 +610,12 @@ local function SpawnOwnedVehicle(plate, coords, src)
         local state = tonumber(row.state)
         if state ~= VS.GARAGED and state ~= VS.OUT then return nil, 'invalid_state' end
         if Security.GetSpawnedEntity(plate) then return nil, 'already_out' end
-        local conflict = liveEntityConflict(plate) -- AD-4: pool scan, not only tracking
+        local conflict = liveEntityConflict(plate, nil, state == VS.GARAGED) -- AD-4 pool scan; R2-M1 clones ignored if GARAGED
         if conflict then return nil, conflict end
         if state == VS.GARAGED then
-            local n = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, parked_at = NULL WHERE plate = ? AND state = ?',
-                { VS.OUT, plate, VS.GARAGED })
-            if n ~= 1 then return nil, 'invalid_state' end
+            local n = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, parked_at = NULL WHERE plate = ? AND state = ? AND owner = ?',
+                { VS.OUT, plate, VS.GARAGED, ident })
+            if n ~= 1 then return nil, 'not_owner' end -- TR-1
         end
         local veh, netId = MDP.Props.SpawnVehicle(row, pos.x, pos.y, pos.z, heading, src) -- pcall + entity cleanup inside (H1/N3)
         if not veh then

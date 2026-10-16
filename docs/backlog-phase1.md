@@ -22,6 +22,10 @@
 | Odómetro | Abierto | km acumulados solo en el cliente conductor; si cambia de conductor sin store/park se pierde el tramo. |
 | Km primer guardado | Aceptado (Senior) | Coches añadidos por otros scripts (p.ej. concesionarios) no tienen hora registrada en su primer guardado: solo aplica el margen de 0,5 km (mitigado en parte por el fallback a `parked_at`/`updated_at` de la BD, N5). |
 | Llaves compartidas (fase 3) | Pendiente | Hoy guardar/aparcar es solo del dueño; las llaves compartidas solo sirven para conducir. `Config.AllowSharedKeyStore` (false) reservado para decidir en fase 3. |
+| TR-3 (fase 2) | Pendiente | DELETE de llaves y UPDATE de dueño en una transacción (hoy el error se registra en el log). |
+| TR-4 (fase 2) | Parcial | Varias filas del framework para una matrícula: hoy se omite el chequeo y no se transfiere (log). Falta una herramienta de admin para resolverlo. |
+| TR-5 (fase 2) | Parcial | Guard old == new hecho. Falta log AUDIT de cada transferencia (dueño antiguo, nuevo, origen) con un helper de Security. |
+| R2-M2 (fase 2) | Pendiente | Diferido por Senior a fase 2 (ver docs/qa-review-phase1-backend.md). |
 
 ## Desde QA fase 1 backend (16/10/2026, HEAD ac77923) — ver docs/qa-review-phase1-backend.md
 

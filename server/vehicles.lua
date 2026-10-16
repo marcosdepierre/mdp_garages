@@ -82,13 +82,17 @@ end
 --- P1-OWN-H1: revoke every key (mdp table + keys resource for the online seller); a live tracked entity stays
 --- tracked and is claimed by the buyer if online.
 local function onOwnerChanged(plate, oldOwner, newOwner)
-    pcall(MySQL.update.await, 'DELETE FROM mdp_vehicle_keys WHERE plate = ?', { plate })
+    local okD, errD = pcall(MySQL.update.await, 'DELETE FROM mdp_vehicle_keys WHERE plate = ?', { plate })
+    if not okD then print(('^1[mdp_garages] %s: clearing shared keys after transfer failed: %s^0'):format(plate, tostring(errD))) end
     local ent = Security.GetSpawnedEntity(plate)
-    local sellerSrc = oldOwner and Bridge.GetSourceByIdentifier and Bridge.GetSourceByIdentifier(oldOwner)
-    if sellerSrc and Bridge.Keys and type(Bridge.Keys.RemoveKeys) == 'function' then
-        pcall(Bridge.Keys.RemoveKeys, sellerSrc, ent or plate)
-    end
     local buyerSrc = newOwner and Bridge.GetSourceByIdentifier and Bridge.GetSourceByIdentifier(newOwner)
+    -- TR-2: revoke keys of EVERY online player except the buyer (temporary/hotwire keys of the keys resource included)
+    if Bridge.Keys and type(Bridge.Keys.RemoveKeys) == 'function' then
+        for _, id in ipairs(GetPlayers()) do
+            local s = tonumber(id)
+            if s and s ~= buyerSrc then pcall(Bridge.Keys.RemoveKeys, s, ent or plate) end
+        end
+    end
     if ent and buyerSrc then pcall(Security.ClaimSpawn, plate, buyerSrc) end
     print(('^3[mdp_garages] owner of %s changed %s -> %s; keys revoked%s^0'):format(plate, tostring(oldOwner), tostring(newOwner),
         ent and ' (entity stays tracked under the buyer)' or ''))
@@ -96,22 +100,38 @@ end
 Vehicles.OnOwnerChanged = onOwnerChanged
 
 --- P1-OWN-H1: transfers apply immediately in every live state (not only garaged/parked). Returns true if applied.
-function Vehicles.ApplyTransfer(plate, oldOwner, newOwner)
-    local ok, n = pcall(MySQL.update.await, 'UPDATE mdp_vehicles SET owner = ? WHERE plate = ? AND owner = ? AND state <> ?',
-        { newOwner, plate, oldOwner, VS.REMOVED })
-    if ok and n == 1 then onOwnerChanged(plate, oldOwner, newOwner) return true end
-    return false
+--- TR-1: runs under WithLock(plate) unless the caller already holds it (opts.locked).
+function Vehicles.ApplyTransfer(plate, oldOwner, newOwner, locked)
+    if type(newOwner) ~= 'string' or newOwner == '' or oldOwner == newOwner then return false end -- TR-5 no-op guard
+    local function apply()
+        local ok, n = pcall(MySQL.update.await, 'UPDATE mdp_vehicles SET owner = ? WHERE plate = ? AND owner = ? AND state <> ?',
+            { newOwner, plate, oldOwner, VS.REMOVED })
+        if ok and n == 1 then onOwnerChanged(plate, oldOwner, newOwner) return true end
+        return false
+    end
+    if locked then return apply() end
+    local res = table.pack(Security.WithLock(plate, 0, apply))
+    return res[1] == true
 end
 
 --- P1-OWN-H1: owner of a plate in the framework table (nil if absent/unsupported). Plates compared trimmed + upper.
+--- R2-M3: indexed lookup (`plate = ?`, never a function on the column). ESX may store plates right-padded to 8.
+--- TR-4: more than one framework row for the plate -> nil + log (ambiguous, no transfer); owner must be a non-empty string.
 function Vehicles.FrameworkOwner(plate)
     local fw = Bridge.Framework
     local q
-    if fw == 'esx' then q = 'SELECT `owner` FROM `owned_vehicles` WHERE UPPER(TRIM(`plate`)) = ? LIMIT 1'
-    elseif fw == 'qb' or fw == 'qbx' then q = 'SELECT `citizenid` FROM `player_vehicles` WHERE UPPER(TRIM(`plate`)) = ? LIMIT 1'
+    if fw == 'esx' then q = 'SELECT `owner` AS o FROM `owned_vehicles` WHERE `plate` = ? OR `plate` = ? LIMIT 2'
+    elseif fw == 'qb' or fw == 'qbx' then q = 'SELECT `citizenid` AS o FROM `player_vehicles` WHERE `plate` = ? OR `plate` = ? LIMIT 2'
     else return nil end
-    local ok, v = pcall(MySQL.scalar.await, q, { plate })
-    return ok and v or nil
+    local padded = #plate < 8 and (plate .. string.rep(' ', 8 - #plate)) or plate
+    local ok, rows = pcall(MySQL.query.await, q, { plate, padded })
+    if not ok or type(rows) ~= 'table' or #rows == 0 then return nil end
+    if #rows > 1 then
+        print(('^3[mdp_garages] %s has %d framework rows: ownership check skipped, no transfer (fix the framework table)^0'):format(plate, #rows))
+        return nil, 'ambiguous'
+    end
+    local o = rows[1].o
+    return (type(o) == 'string' and o ~= '') and o or nil
 end
 
 --- Diff-based apply (QA R3-2/R3-3): only NEW plates are inserted; plates whose owner differs are transferred
@@ -158,8 +178,9 @@ function Vehicles.InsertBatch(rows, opts)
             elseif not e then
                 -- M5: if the framework table has a date column, a NULL or future date is never adoptable
                 local age = r.fwHasDate and r.fwCreatedTs and (os.time() - (tonumber(r.fwCreatedTs) or -1)) or nil
+                -- fail closed: without a DATETIME/TIMESTAMP date column in the framework table, never adoptable
                 local adoptable = adoptableImport and r.state == VS.OUT
-                    and (not r.fwHasDate or (age ~= nil and age >= -300 and age <= 1800)) -- AD-2: small clock skew allowed
+                    and r.fwHasDate and age ~= nil and age >= -300 and age <= 1800 -- AD-2: small clock skew allowed
                 ph[#ph + 1] = adoptable and "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'framework', NULL)"
                     or "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'framework', NOW())"
                 if adoptable then print(('[mdp_garages] %s imported for %s as new detection (adoptable 30 min)'):format(r.plate, tostring(r.owner))) end
@@ -305,7 +326,7 @@ end
 
 ---------------------------------------------------------------------------
 -- Export for dealerships: exports.mdp_garages:AddVehicle(owner, plate, model, props?, garageId?)
--- Returns ok:boolean, err?:string ('invalid_owner'|'invalid_plate'|'invalid_model'|'invalid_props'|'plate_exists'|'db_error')
+-- Returns true, nil|'exists'|'transferred'|'restored'  or  false, 'invalid_owner'|'invalid_plate'|'invalid_model'|'invalid_props'|'transfer_failed'|'db_error'
 ---------------------------------------------------------------------------
 function Vehicles.AddVehicle(owner, plate, model, props, garageId)
     if type(owner) ~= 'string' or owner == '' or #owner > 64 then return false, 'invalid_owner' end
@@ -346,7 +367,7 @@ function Vehicles.AddVehicle(owner, plate, model, props, garageId)
             props = COALESCE(?, props), source = 'mdp', coords = NULL, parked_at = NULL WHERE plate = ? AND state = ?]],
             { initialState, owner, garageId, model, vtype, propsJson, plate, VS.REMOVED })
         if not okR then return false, 'db_error' end
-        if n ~= 1 then return false, 'transfer_deferred' end
+        if n ~= 1 then return false, 'transfer_failed' end
         -- R6-2: key cleanup must not throw after the restore is done
         local okK, errK = pcall(MySQL.update.await, 'DELETE FROM mdp_vehicle_keys WHERE plate = ?', { plate })
         if not okK then print(('^1[mdp_garages] %s restored but clearing shared keys failed: %s^0'):format(plate, tostring(errK))) end
