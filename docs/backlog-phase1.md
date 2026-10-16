@@ -21,6 +21,7 @@
 | Streamer props | Abierto | Las props no se leen en servidor: al despawnear solo se guardan coords/heading/salud; mods cambiados en un coche aparcado se pierden hasta el siguiente store/park. |
 | Odómetro | Abierto | km acumulados solo en el cliente conductor; si cambia de conductor sin store/park se pierde el tramo. |
 | Km primer guardado | Aceptado (Senior) | Coches añadidos por otros scripts (p.ej. concesionarios) no tienen hora registrada en su primer guardado: solo aplica el margen de 0,5 km (mitigado en parte por el fallback a `parked_at`/`updated_at` de la BD, N5). |
+| Llaves compartidas (fase 3) | Pendiente | Hoy guardar/aparcar es solo del dueño; las llaves compartidas solo sirven para conducir. `Config.AllowSharedKeyStore` (false) reservado para decidir en fase 3. |
 
 ## Desde QA fase 1 backend (16/10/2026, HEAD ac77923) — ver docs/qa-review-phase1-backend.md
 

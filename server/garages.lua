@@ -197,45 +197,90 @@ local function schemaWith(base)
     return base
 end
 
---- Shared checks for store/parkWorld, run INSIDE the plate lock (M3). Returns row, tracked | nil, err.
-local function lockedVehicleChecks(src, plate, veh, evName)
+--- Store/park: the plate comes from the server mark / tracking, NEVER from the client's plate text.
+--- Candidate = mdp_plate bag (forgeable) -> proven by Security.IsServerEntity (secret, non-replicated tag) + tracking.
+local function candidatePlate(ent)
+    local p = Entity(ent).state.mdp_plate
+    p = type(p) == 'string' and Utils.NormalizePlate(p) or nil
+    return (p and Utils.IsValidPlate(p)) and p or nil
+end
+
+--- Local twin of Security.CanStoreOwnVehicle(src, ent, opts) -> ok, plate | false, err (same error names):
+--- not_server_entity, plate_mismatch, not_tracked, not_owner, wrong_state, model_mismatch, too_far.
+--- opts = { plate, row, maxDistance, allowDriver, allowKeys }. Must run INSIDE the plate lock with a fresh row.
+local function localCanStoreOwnVehicle(src, ent, opts)
+    local plate = opts.plate
+    if not plate or not Security.IsServerEntity(ent, plate) then return false, 'not_server_entity' end
+    local text = Utils.NormalizePlate(GetVehicleNumberPlateText(ent) or '')
+    if text ~= plate then return false, 'plate_mismatch' end
+    if Security.GetSpawnedEntity(plate) ~= ent then return false, 'not_tracked' end
+    local row = opts.row
+    if not row or not Security.IsOwner(src, plate, opts.allowKeys == true) then return false, 'not_owner' end
+    if tonumber(row.state) ~= VS.OUT then return false, 'wrong_state' end
+    if not Utils.SameModel(GetEntityModel(ent), Utils.ModelHash(row.model)) then return false, 'model_mismatch' end
+    local isDriver = opts.allowDriver and GetPedInVehicleSeat(ent, -1) == GetPlayerPed(src)
+    if not isDriver and not Security.IsNear(src, GetEntityCoords(ent), opts.maxDistance or Config.MaxVehicleDistance) then
+        return false, 'too_far'
+    end
+    return true, plate
+end
+
+local STORE_ERR = { not_owner = 'not_owner', wrong_state = 'invalid_state', too_far = 'too_far',
+    not_server_entity = 'vehicle_mismatch', plate_mismatch = 'vehicle_mismatch', not_tracked = 'vehicle_mismatch',
+    model_mismatch = 'vehicle_mismatch' }
+
+--- Pre-lock: which plate to lock on, or an early error (NPC car / unmarked car). Never uses the plate text as authority.
+local function storeTarget(netId)
+    netId = math.tointeger(netId)
+    local ent = netId and NetworkGetEntityFromNetworkId(netId)
+    if not ent or ent == 0 or not DoesEntityExist(ent) or GetEntityType(ent) ~= 2 then return nil, nil, 'invalid_request' end
+    local plate = candidatePlate(ent)
+    if plate and Security.IsServerEntity(ent, plate) then return ent, plate end
+    -- unmarked: NPC/street car (no row) -> not_owned_vehicle; registered plate on an unmarked entity -> vehicle_mismatch
+    local text = Utils.NormalizePlate(GetVehicleNumberPlateText(ent) or '')
+    local row = text and Utils.IsValidPlate(text)
+        and MySQL.scalar.await('SELECT 1 FROM mdp_vehicles WHERE plate = ? AND state <> ?', { text, VS.REMOVED })
+    return nil, nil, row and 'vehicle_mismatch' or 'not_owned_vehicle'
+end
+
+--- INSIDE the plate lock, before any side effect: re-read row, then all Security conditions (1)-(5).
+local function lockedOwnVehicle(src, ent, plate, evName, allowDriver)
     local row = MySQL.single.await([[SELECT plate, owner, model, state, fuel, mileage,
         UNIX_TIMESTAMP(COALESCE(parked_at, updated_at)) AS mileage_ts FROM mdp_vehicles WHERE plate = ?]], { plate })
-    if not row or tonumber(row.state) == VS.REMOVED then return nil, 'not_found' end
-    if not Utils.SameModel(GetEntityModel(veh), Utils.ModelHash(row.model)) then return nil, 'invalid_request' end
-    local tracked = Security.GetSpawnedEntity(plate)
-    if tracked and tracked ~= veh then
-        -- another tracked entity has this plate: this one is a clone
-        Security.LogReject(src, evName, 'clone_detected', { plate = plate })
-        DeleteEntity(veh)
-        return nil, 'clone_detected'
+    if not row or tonumber(row.state) == VS.REMOVED then return nil, 'not_owned_vehicle' end
+    local opts = { plate = plate, row = row, maxDistance = Config.MaxVehicleDistance, allowDriver = allowDriver,
+        allowKeys = Config.AllowSharedKeyStore == true }
+    local ok, res
+    if type(Security.CanStoreOwnVehicle) == 'function' then
+        local okC, a, b = pcall(Security.CanStoreOwnVehicle, src, ent, opts)
+        if okC then ok, res = a, b else ok, res = false, 'not_server_entity' end
+    else
+        ok, res = localCanStoreOwnVehicle(src, ent, opts)
     end
-    return row, tracked
+    if not ok then
+        Security.LogReject(src, evName, tostring(res), { plate = plate })
+        return nil, STORE_ERR[res] or 'vehicle_mismatch'
+    end
+    if res ~= plate then return nil, 'vehicle_mismatch' end
+    return row
 end
 
 MDP.Callback('mdp_garages:storeVehicle', {
     rateLimit = { max = 1, windowMs = 1000 },
     schema = schemaWith({ netId = Security.Int(1, 65535), garage_id = Security.V.isGarageId, vclass = Security.Optional(Security.Int(0, 22)) }),
-    resolvePlate = MDP.Vehicles.ResolvePlateFromNetId, -- server-side plate -> data._plate
-    requireOwnership = true,              -- owner or key holder, checked on data._plate
+    -- no resolvePlate (it reads the plate text) and no requireOwnership (accepts keys): see lockedOwnVehicle
     distance = { getCoords = garageCoords, max = Config.MaxGarageDistance },
 }, function(src, data)
     local garage, gerr = Utils.GetGarage(data.garage_id, GARAGE_KINDS)
     if not garage then return { ok = false, error = gerr } end
-    local plate = data._plate
-    local _, _, veh = Security.PlateFromNetId(data.netId)
-    if not veh then return { ok = false, error = 'invalid_request' } end
-    if not Security.IsNear(src, GetEntityCoords(veh), Config.MaxVehicleDistance) then return { ok = false, error = 'too_far' } end
+    local veh, plate, terr = storeTarget(data.netId)
+    if not veh then return { ok = false, error = terr } end
     local ped = GetPlayerPed(src)
     if GetVehiclePedIsIn(ped, false) ~= veh then return { ok = false, error = 'not_in_vehicle' } end
     if not Utils.OnlyDriverInside(veh, ped) then return { ok = false, error = 'occupied' } end -- R3b-2
     local res = table.pack(Security.WithLock(plate, src, function()
-        local row, tracked = lockedVehicleChecks(src, plate, veh, 'mdp_garages:storeVehicle')
-        if not row then return { ok = false, error = tracked } end
-        local st = tonumber(row.state)
-        if st ~= VS.OUT and st ~= VS.PARKED_WORLD then return { ok = false, error = 'invalid_state' } end
-        -- R3-1: untracked (dealership/other script) accepted only in state OUT
-        if not tracked and st ~= VS.OUT then return { ok = false, error = 'not_tracked' } end
+        local row, err = lockedOwnVehicle(src, veh, plate, 'mdp_garages:storeVehicle', true)
+        if not row then return { ok = false, error = err } end
         local vtype = resolveVehicleType(veh, row.model, data.vclass)
         if not Utils.GarageAllowsType(garage, vtype) then return { ok = false, error = 'wrong_vehicle_type' } end
         -- H2: Security.SanitizeProps inside the lock, entity passed as 3rd arg; store its JSON
@@ -252,9 +297,9 @@ MDP.Callback('mdp_garages:storeVehicle', {
             SET state = ?, garage_id = ?, vtype = ?, engine = ?, body = ?, fuel = ?, mileage = ?, props = COALESCE(?, props),
                 coords = NULL, parked_at = NULL
             WHERE plate = ? AND state = ?]],
-            { VS.GARAGED, data.garage_id, vtype, engine, body, fuel, mileage, propsJson, plate, st })
+            { VS.GARAGED, data.garage_id, vtype, engine, body, fuel, mileage, propsJson, plate, VS.OUT })
         if affected ~= 1 then return { ok = false, error = 'invalid_state' } end
-        if tracked then Security.UntrackSpawn(plate) end
+        Security.UntrackSpawn(plate)
         MDP.Props.ForgetMileage(plate) -- N7: garaged; next spawn stamps again
         MDP.Streamer.Forget(plate)
         DeleteEntity(veh)
@@ -295,18 +340,16 @@ end
 MDP.Callback('mdp_garages:parkWorld', {
     rateLimit = { max = 1, windowMs = 1000 },
     schema = schemaWith({ netId = Security.Int(1, 65535), vclass = Security.Optional(Security.Int(0, 22)) }),
-    resolvePlate = MDP.Vehicles.ResolvePlateFromNetId,
-    requireOwnership = true,
+    -- owner-only + server mark: pre-check below (before limits/auto-impound) and the full check inside the lock
 }, function(src, data)
-    local plate = data._plate
-    local _, _, veh = Security.PlateFromNetId(data.netId)
-    if not veh then return { ok = false, error = 'invalid_request' } end
-    if not Security.IsNear(src, GetEntityCoords(veh), Config.MaxVehicleDistance) then return { ok = false, error = 'too_far' } end
+    local veh, plate, terr = storeTarget(data.netId)
+    if not veh then return { ok = false, error = terr } end
     if not Utils.IsVehicleEmpty(veh) then return { ok = false, error = 'occupied' } end
     local c, h = GetEntityCoords(veh), GetEntityHeading(veh)
     if not MDP.Props.ValidCoords(c) then return { ok = false, error = 'invalid_request' } end -- L4
-    local owner = MySQL.scalar.await('SELECT owner FROM mdp_vehicles WHERE plate = ?', { plate })
-    if not owner then return { ok = false, error = 'not_found' } end
+    local owner = MySQL.scalar.await("SELECT owner FROM mdp_vehicles WHERE plate = ? AND state <> ?", { plate, VS.REMOVED })
+    if not owner then return { ok = false, error = 'not_owned_vehicle' } end
+    if not Security.IsOwner(src, plate, Config.AllowSharedKeyStore == true) then return { ok = false, error = 'not_owner' } end
     local mine = MySQL.scalar.await('SELECT COUNT(*) FROM mdp_vehicles WHERE owner = ? AND state = ?', { owner, VS.PARKED_WORLD }) or 0
     if mine >= (Config.MaxWorldParkedPerPlayer or 5) then
         Bridge.Notify(src, _L('world_limit_player', Config.MaxWorldParkedPerPlayer or 5), 'error')
@@ -318,9 +361,8 @@ MDP.Callback('mdp_garages:parkWorld', {
         return { ok = false, error = 'world_limit' }
     end
     local res = table.pack(Security.WithLock(plate, src, function()
-        local row, tracked = lockedVehicleChecks(src, plate, veh, 'mdp_garages:parkWorld')
-        if not row then return { ok = false, error = tracked } end
-        if tonumber(row.state) ~= VS.OUT then return { ok = false, error = 'invalid_state' } end
+        local row, err = lockedOwnVehicle(src, veh, plate, 'mdp_garages:parkWorld', false) -- player is out: distance applies
+        if not row then return { ok = false, error = err } end
         local _, propsJson = MDP.Props.Sanitize(data.props, row, veh)
         if data.props ~= nil and not propsJson then return { ok = false, error = 'invalid_props' } end
         local fuel = MDP.Props.ResolveFuel(veh, data.fuel, row.fuel)
@@ -330,10 +372,6 @@ MDP.Callback('mdp_garages:parkWorld', {
             mileage = ?, props = COALESCE(?, props), parked_at = CURRENT_TIMESTAMP WHERE plate = ? AND state = ?]],
             { VS.PARKED_WORLD, json.encode({ x = c.x, y = c.y, z = c.z }), h, engine, body, fuel, mileage, propsJson, plate, VS.OUT })
         if n ~= 1 then return { ok = false, error = 'invalid_state' } end
-        if not tracked then
-            Security.TrackSpawn(plate, math.tointeger(data.netId), src)
-            Entity(veh).state:set('mdp_plate', plate, true)
-        end
         SetVehicleDoorsLocked(veh, 2)
         MDP.Props.StampMileage(plate)
         MDP.Streamer.Track(plate) -- the streamer now owns it
@@ -344,3 +382,37 @@ MDP.Callback('mdp_garages:parkWorld', {
     if res[1] == false then return { ok = false, error = res[2] or 'locked' } end
     return res[1]
 end)
+
+---------------------------------------------------------------------------
+-- /mdp_regularize <plate> (ace: command.mdp_regularize): fixes pre-a8fda43 / unmarked cars that can no longer be stored.
+-- Deletes every EMPTY unmarked entity carrying that plate and puts the row in GARAGED at its last garage
+-- (or Config.DefaultGarage). Occupied entities are left alone and the command refuses. Logged.
+---------------------------------------------------------------------------
+RegisterCommand('mdp_regularize', function(src, args)
+    local function reply(msg) if src == 0 then print('[mdp_garages] ' .. msg) else Bridge.Notify(src, msg, 'inform') end end
+    local plate = Utils.NormalizePlate(table.concat(args or {}, ' '))
+    if not plate or not Utils.IsValidPlate(plate) then return reply('usage: mdp_regularize <plate>') end
+    Security.WithLock(plate, src, function()
+        local row = MySQL.single.await('SELECT garage_id, state FROM mdp_vehicles WHERE plate = ? AND state <> ?', { plate, VS.REMOVED })
+        if not row then return reply(('no vehicle %s'):format(plate)) end
+        local tracked = Security.GetSpawnedEntity(plate)
+        local deleted = 0
+        for _, ent in ipairs(GetAllVehicles()) do
+            if Utils.NormalizePlate(GetVehicleNumberPlateText(ent) or '') == plate and not Security.IsServerEntity(ent, plate) then
+                if not Utils.IsVehicleEmpty(ent) then return reply(('%s: an unmarked entity is occupied, try again when empty'):format(plate)) end
+                if ent == tracked then Security.UntrackSpawn(plate) end
+                DeleteEntity(ent); deleted = deleted + 1
+            end
+        end
+        if Security.GetSpawnedEntity(plate) then return reply(('%s: a marked entity is still out; store it normally'):format(plate)) end
+        local gid = Utils.ResolveGarageId and Utils.ResolveGarageId(row.garage_id, plate) or row.garage_id
+        if type(gid) ~= 'string' or gid == '' or gid:sub(1, 7) == 'impound' then gid = Config.DefaultGarage end
+        MySQL.update.await('UPDATE mdp_vehicles SET state = ?, garage_id = ?, coords = NULL, parked_at = NULL WHERE plate = ? AND state <> ?',
+            { VS.GARAGED, gid, plate, VS.REMOVED })
+        MDP.Streamer.Forget(plate)
+        MDP.Props.Hook(Bridge.FrameworkSync, 'OnStore', plate, gid)
+        print(('[mdp_garages] mdp_regularize by %s: %s -> GARAGED in %s (%d unmarked entities deleted, previous state %s)')
+            :format(src == 0 and 'console' or tostring(src), plate, gid, deleted, tostring(row.state)))
+        reply(('%s regularized -> %s'):format(plate, gid))
+    end)
+end, true) -- restricted: add_ace group.admin command.mdp_regularize allow

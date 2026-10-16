@@ -312,6 +312,8 @@ This list is definitive. `Constants.ErrorCodes` (Lua), the locale keys `ui.err_<
 - `vehicle_moved`
 - `occupied`
 - `invalid_props`
+- `not_owned_vehicle`
+- `vehicle_mismatch`
 - `timeout`
 
 `timeout` is **NUI-only**: the NUI generates it when a callback doesn't answer, and the server never sends it. `impounded` applies to state 3 (paid release is phase 5), and `fine_not_found` comes from payFine. On the client, `Utils.ErrorCode` strips any `:<detail>` suffix (for example `plate_unresolved:no_entity` becomes `plate_unresolved`) and maps undocumented codes, such as internal Security reasons like `job_denied` or `unknown_field`, to `rejected`. Notifications use `Utils.ErrorText(code)`, which reads `ui.err_<code>`. Prices and fees are never accepted from the NUI; the server computes them from config/DB.
@@ -401,3 +403,18 @@ Restart: recovery runs first (R5-3/R6-1); adopted state-2 entities stay tracked.
 - **`open` message** also carries `lang` (= `Config.Locale`, e.g. `'en'`/`'es'`; the NUI uses it for number/date formatting) besides `locale`. `data` may come **without `vehicles`**: the NUI then calls the `getVehicles` callback itself.
 - **`toast` action** (works without NUI focus, panel may be closed): `SendNUIMessage({action='toast', id, kind, titleKey?, title?, description?, error?, locale, lang})`. Lua export **`exports.mdp_garages:GarageToast(t)`** with `t = { id?: string, kind: 'loading'|'success'|'error', titleKey?: string (ui locale key, translated by the NUI), title?: string (already translated), description?: string, error?: string (contract error code, normalized with Utils.ErrorCode) }`. The same `id` replaces the previous toast (loading → result). Used by `client/zones.lua` for store/park feedback: loading toasts with ui keys `storing` / `parking`, results with `_L('vehicle_stored')` / `_L('vehicle_parked')`. `taken_out` is shown by the NUI itself after a successful `takeOut`.
 - **Health display:** the server stores engine -4000..1000 (`Security.ClampHealth`); the NUI clamps engine/body to 0..1000 before showing percentages.
+
+### Owner-only store/park (Marcos, blocking; Security conditions)
+`storeVehicle` and `parkWorld` require **all** of: (1) `Security.IsServerEntity(ent, plate)`; (2) `Security.GetSpawnedEntity(plate) == ent`; (3) row re-read **inside the plate lock**, state **OUT (0)**, `Security.IsOwner(src, plate, false)` (owner only; keys never count unless `Config.AllowSharedKeyStore`, default false, reserved for phase 3); (4) `Utils.SameModel(entity, DB model)`; (5) within `MaxVehicleDistance` or the player is the driver (store: driver; park: distance). The plate comes from the server mark/tracking (`mdp_plate` candidate proven by the secret, non-replicated mark), **never from the client's plate text**; the plate text must equal it (`plate_mismatch`).
+Uses `Security.CanStoreOwnVehicle(src, ent, opts) -> ok, plate|err` when present, otherwise an identical local check with the same error names. All checks run before any side effect (despawn, keys, mirror, limits/auto-impound — parkWorld pre-checks owner first).
+
+| Check result | Code sent |
+|---|---|
+| unmarked entity with no DB row (NPC/street car), or row missing/REMOVED | `not_owned_vehicle` |
+| `not_owner` | `not_owner` |
+| `not_server_entity`, `plate_mismatch`, `not_tracked`, `model_mismatch`, unmarked entity with a registered plate | `vehicle_mismatch` |
+| `wrong_state` | `invalid_state` |
+| `too_far` | `too_far` |
+
+Store from state 2 and the old "untracked OUT car" exception (f7e1789/R3-1) are **removed**: unmarked cars (pre-a8fda43, other scripts) get `vehicle_mismatch`; an admin fixes them with **`/mdp_regularize <plate>`** (ace `command.mdp_regularize`): deletes every empty unmarked entity with that plate (refuses if one is occupied or a marked entity is still out) and sets the row GARAGED at its last garage (`Utils.ResolveGarageId`) or `Config.DefaultGarage`; logged.
+Texts: `not_owner` 'This vehicle is not yours' / 'Este vehículo no es tuyo'; `not_owned_vehicle` 'You can only store your own vehicles' / 'Solo puedes guardar tus propios vehículos'; `vehicle_mismatch` 'This is not the registered vehicle' / 'Este no es el vehículo registrado'.
