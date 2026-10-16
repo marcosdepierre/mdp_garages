@@ -107,8 +107,15 @@ Config.StreamerTickMs = 1500
 Config.StreamerRefreshMs = 30000
 -- Max parked-vehicle spawns started per streamer tick (avoids entity spikes) · integer · 5
 Config.StreamerMaxSpawnsPerTick = 5
--- Max km accepted per store over the DB odometer (anti-tamper; mileage never decreases). Default 300.
-Config.MaxMileageDeltaKm = 300
+-- Hard cap of km accepted per store/park over the DB odometer (mileage never decreases) · number · 50
+Config.MaxMileageDeltaKm = 50
+-- Time-based km cap: max plausible speed (km/h) since the last mileage update, plus a fixed margin (km) · 400 / 0.5
+Config.MaxSpeedKmh = 400
+Config.MileageMarginKm = 0.5
+-- Streamer: wait this long (ms) for the network owner's props snapshot before despawning a parked car · 2000
+Config.SnapshotTimeoutMs = 2000
+-- Snapshot token lifetime (ms); single use, sent only to the entity owner · 5000
+Config.SnapshotTokenTtlMs = 5000
 
 -- takeOut of a world-parked car (state 2) is refused if it moved more than this (m) from its stored coords · number · 5.0
 Config.ParkedMoveTolerance = 5.0

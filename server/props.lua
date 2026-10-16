@@ -31,7 +31,7 @@ function MDP.Props.Sanitize(props, dbRow, veh)
     if props == nil then return nil, nil end
     if type(props) ~= 'table' then return nil, 'props_not_table' end
     if Security.SanitizeProps then
-        local ok, clean, err, encoded = pcall(Security.SanitizeProps, props, dbRow, veh)
+        local ok, clean, err, encoded = pcall(Security.SanitizeProps, props, dbRow, veh, MDP.Props.ElapsedSec(dbRow.plate))
         if not ok then return nil, 'sanitize_error' end
         if not clean then return nil, err or 'invalid_props' end
         return clean, encoded or json.encode(clean)
@@ -60,12 +60,30 @@ function MDP.Props.ResolveFuel(veh, clientFuel, dbFuel)
     return math.min(clampFuel(f), dbFuel + 2)
 end
 
---- Mileage (km) never decreases; per-store increase capped by Config.MaxMileageDeltaKm.
-function MDP.Props.ResolveMileage(clientKm, dbKm)
+--- Time base for the km cap: last mileage update per plate (set on spawn/takeOut/streamer spawn, store, park).
+local mileageStamp = {}
+function MDP.Props.StampMileage(plate) if plate then mileageStamp[plate] = os.time() end end
+function MDP.Props.ElapsedSec(plate)
+    return plate and mileageStamp[plate] and math.max(0, os.time() - mileageStamp[plate]) or 0
+end
+
+--- Mileage (km) never decreases. Allowed delta = elapsed s * Config.MaxSpeedKmh / 3600 + Config.MileageMarginKm,
+--- capped by Config.MaxMileageDeltaKm. Over-cap values are clamped and logged. Security.ClampMileage wins if present.
+function MDP.Props.ResolveMileage(clientKm, dbKm, plate)
     dbKm = tonumber(dbKm) or 0
     local v = tonumber(clientKm)
     if not v or v ~= v or v < dbKm then return dbKm end
-    return math.min(v, dbKm + (Config.MaxMileageDeltaKm or 300))
+    local elapsed = MDP.Props.ElapsedSec(plate)
+    if Security.ClampMileage then -- Security.ClampMileage(plate, oldKm, newKm, elapsedSec) -> km
+        local ok, r = pcall(Security.ClampMileage, plate, dbKm, v, elapsed)
+        if ok and tonumber(r) then return math.max(dbKm, tonumber(r)) end
+    end
+    local allowed = math.min(elapsed * (Config.MaxSpeedKmh or 400) / 3600 + (Config.MileageMarginKm or 0.5), Config.MaxMileageDeltaKm or 50)
+    if v - dbKm > allowed then
+        print(('^3[mdp_garages] mileage over cap for %s: +%.2f km in %d s (allowed %.2f), clamped^0'):format(tostring(plate), v - dbKm, elapsed, allowed))
+        return dbKm + allowed
+    end
+    return v
 end
 
 --- DB props JSON -> table (L2: oversized blobs are ignored, never replicated).
@@ -117,6 +135,7 @@ function MDP.Props.SpawnVehicle(row, x, y, z, heading, ownerSrc)
     end
     local netId = NetworkGetNetworkIdFromEntity(veh)
     Security.TrackSpawn(row.plate, netId, ownerSrc)
+    MDP.Props.StampMileage(row.plate)
     return veh, netId
 end
 

@@ -6,7 +6,8 @@
 --  5 TrackSpawn + mdp_plate after DoesEntityExist
 --  6 an untracked world entity with the same plate+model is adopted instead of spawning (duplicates: none, logged)
 --  7 at most Config.StreamerMaxSpawnsPerTick spawns started per tick
--- Despawn (empty, nearest player > WorldSpawnRadius + DespawnMargin): save coords/heading/health if changed, delete.
+-- Despawn (empty, nearest player > WorldSpawnRadius + DespawnMargin): props snapshot from the network owner (async, timeout
+-- Config.SnapshotTimeoutMs), then inside the lock save props (SanitizeProps) + coords/heading/health if changed, delete.
 -- A driver in a parked car makes it OUT (0) and ClaimSpawn for that driver.
 MDP.Streamer = {}
 local VS = Constants.VehicleState
@@ -16,6 +17,7 @@ local registry = {}   -- plate -> { plate, pos = vec3, engine, body }  (position
 local pending = {}    -- plate -> true while a spawn thread runs
 local backoff = {}    -- plate -> { fails, nextTry }
 local lastRefresh = 0
+local snaps = {}      -- plate -> { token, veh, owner, props?, done } while a despawn snapshot is pending
 
 local function decodeCoords(raw)
     local ok, c = pcall(json.decode, raw or '')
@@ -95,9 +97,21 @@ local function spawnParked(plate)
     end)
 end
 
-local function despawnParked(plate, veh)
+local function despawnParked(plate, veh, snapProps)
     Security.WithLock(plate, 0, function()
         if Security.GetSpawnedEntity(plate) ~= veh or not Utils.IsVehicleEmpty(veh) then return end
+        -- owner's props snapshot: sanitized by Security, saved only while the row is still PARKED_WORLD
+        if snapProps then
+            local row = MySQL.single.await('SELECT plate, owner, model, state, fuel, mileage FROM mdp_vehicles WHERE plate = ? AND state = ?',
+                { plate, VS.PARKED_WORLD })
+            if not row then return end
+            local _, propsJson = MDP.Props.Sanitize(snapProps, row, veh)
+            if propsJson then
+                MySQL.update.await('UPDATE mdp_vehicles SET props = ? WHERE plate = ? AND state = ?', { propsJson, plate, VS.PARKED_WORLD })
+            else
+                print(('^3[mdp_garages] streamer: snapshot props rejected for %s, keeping last saved^0'):format(plate))
+            end
+        end
         local r = registry[plate]
         local c, h = GetEntityCoords(veh), GetEntityHeading(veh)
         local engine = MDP.Props.Health('engine', GetVehicleEngineHealth(veh))
@@ -117,6 +131,47 @@ local function despawnParked(plate, veh)
         DeleteEntity(veh)
     end)
 end
+
+--- Ask the entity's network owner for a props snapshot, then despawn after the reply or the timeout. Async per car.
+local function snapshotThenDespawn(plate, veh)
+    if snaps[plate] then return end
+    local owner = NetworkGetEntityOwner(veh)
+    if not owner or owner <= 0 then return despawnParked(plate, veh, nil) end -- no client owns it: nothing to read
+    -- single-use random token, sent ONLY to the owner (never a replicated state bag), TTL Config.SnapshotTokenTtlMs
+    local snap = { token = math.random(1, 0x7FFFFFFF), veh = veh, owner = owner,
+        expires = GetGameTimer() + (Config.SnapshotTokenTtlMs or 5000) }
+    snaps[plate] = snap
+    CreateThread(function()
+        TriggerClientEvent('mdp_garages:client:propsSnapshotReq', owner, NetworkGetNetworkIdFromEntity(veh), snap.token)
+        local deadline = GetGameTimer() + (Config.SnapshotTimeoutMs or 2000)
+        while not snap.done and GetGameTimer() < deadline do Wait(100) end
+        if not snap.done then print(('^3[mdp_garages] streamer: no props snapshot for %s (timeout), keeping last saved^0'):format(plate)) end
+        snap.token = nil -- consumed / expired
+        local ok, err = pcall(despawnParked, plate, veh, snap.props)
+        if not ok then print(('^1[mdp_garages] streamer despawn error %s: %s^0'):format(plate, tostring(err))) end
+        snaps[plate] = nil
+    end)
+end
+
+-- Reply from the owner's client (client/props.lua): { netId, token, props }.
+RegisterNetEvent('mdp_garages:server:propsSnapshot', function(payload)
+    local src = source
+    if Security.RateLimit and not Security.RateLimit(src, 'ev:propsSnapshot', 10, 5000) then return end
+    if type(payload) ~= 'table' or type(payload.props) ~= 'table' then return end
+    local netId, token = math.tointeger(payload.netId), math.tointeger(payload.token)
+    if not netId or not token then return end
+    local ent = NetworkGetEntityFromNetworkId(netId)
+    if not ent or ent == 0 or not DoesEntityExist(ent) then return end
+    local plate = Entity(ent).state.mdp_plate
+    local snap = plate and snaps[plate]
+    if not snap or snap.done or not snap.token or snap.veh ~= ent or snap.token ~= token or GetGameTimer() > snap.expires then return end
+    if NetworkGetEntityOwner(ent) ~= src then -- only the current network owner may answer
+        if Security.LogReject then Security.LogReject(src, 'mdp_garages:server:propsSnapshot', 'not_entity_owner', { plate = plate }) end
+        return
+    end
+    snap.token = nil -- single use
+    snap.props, snap.done = payload.props, true
+end)
 
 local function becameDriven(plate, veh, driverPed)
     Security.WithLock(plate, 0, function()
@@ -146,8 +201,8 @@ local function tick()
             local driver = GetPedInVehicleSeat(veh, -1)
             if driver and driver ~= 0 then
                 becameDriven(plate, veh, driver)
-            elseif nearest(GetEntityCoords(veh), players) > despawnR then
-                despawnParked(plate, veh)
+            elseif not snaps[plate] and nearest(GetEntityCoords(veh), players) > despawnR and Utils.IsVehicleEmpty(veh) then
+                snapshotThenDespawn(plate, veh)
             end
         elseif budget > 0 and not pending[plate] and #players > 0 and nearest(r.pos, players) <= spawnR
             and (not backoff[plate] or now >= backoff[plate].nextTry) then

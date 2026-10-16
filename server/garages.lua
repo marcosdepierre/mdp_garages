@@ -244,7 +244,7 @@ MDP.Callback('mdp_garages:storeVehicle', {
             return { ok = false, error = 'invalid_props' }
         end
         local fuel = MDP.Props.ResolveFuel(veh, data.fuel, row.fuel)
-        local mileage = MDP.Props.ResolveMileage(data.mileage, row.mileage)
+        local mileage = MDP.Props.ResolveMileage(data.mileage, row.mileage, plate)
         local engine = MDP.Props.Health('engine', GetVehicleEngineHealth(veh)) -- M4
         local body = MDP.Props.Health('body', GetVehicleBodyHealth(veh))
         local affected = MySQL.update.await([[UPDATE mdp_vehicles
@@ -254,6 +254,7 @@ MDP.Callback('mdp_garages:storeVehicle', {
             { VS.GARAGED, data.garage_id, vtype, engine, body, fuel, mileage, propsJson, plate, st })
         if affected ~= 1 then return { ok = false, error = 'invalid_state' } end
         if tracked then Security.UntrackSpawn(plate) end
+        MDP.Props.StampMileage(plate)
         MDP.Streamer.Forget(plate)
         DeleteEntity(veh)
         MDP.Props.Hook(Bridge.Keys, 'OnStore', src, plate, VS.GARAGED) -- removes temporary keys per Config.RemoveKeysOnStore
@@ -322,7 +323,7 @@ MDP.Callback('mdp_garages:parkWorld', {
         local _, propsJson = MDP.Props.Sanitize(data.props, row, veh)
         if data.props ~= nil and not propsJson then return { ok = false, error = 'invalid_props' } end
         local fuel = MDP.Props.ResolveFuel(veh, data.fuel, row.fuel)
-        local mileage = MDP.Props.ResolveMileage(data.mileage, row.mileage)
+        local mileage = MDP.Props.ResolveMileage(data.mileage, row.mileage, plate)
         local engine, body = MDP.Props.Health('engine', GetVehicleEngineHealth(veh)), MDP.Props.Health('body', GetVehicleBodyHealth(veh))
         local n = MySQL.update.await([[UPDATE mdp_vehicles SET state = ?, coords = ?, heading = ?, engine = ?, body = ?, fuel = ?,
             mileage = ?, props = COALESCE(?, props), parked_at = CURRENT_TIMESTAMP WHERE plate = ? AND state = ?]],
@@ -333,6 +334,7 @@ MDP.Callback('mdp_garages:parkWorld', {
             Entity(veh).state:set('mdp_plate', plate, true)
         end
         SetVehicleDoorsLocked(veh, 2)
+        MDP.Props.StampMileage(plate)
         MDP.Streamer.Track(plate) -- the streamer now owns it
         MDP.Props.Hook(Bridge.Keys, 'OnStore', src, plate, VS.PARKED_WORLD) -- keeps temporary keys for state 2
         MDP.Props.Hook(Bridge.FrameworkSync, 'Mirror', plate, { state = VS.PARKED_WORLD, props = propsJson, fuel = fuel, engine = engine, body = body })
