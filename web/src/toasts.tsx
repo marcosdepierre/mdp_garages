@@ -18,7 +18,7 @@ const META: Record<ToastKind, { color: 'success' | 'error' | 'warning' | 'brand'
 export interface ToastInput { id?: string; kind: ToastKind; title: string; description?: string; closeLabel: string }
 
 export function showToast({ id, kind, title, description, closeLabel }: ToastInput) {
-  const m = META[kind];
+  const m = META[kind] ?? META.info; // unknown kind from Lua → neutral info toast (never crash)
   return toast.custom((tid) => (
     <div role={kind === 'error' ? 'alert' : 'status'} className="flex w-85 items-start gap-3 rounded-xl bg-secondary p-4 shadow-lg ring-1 ring-secondary">
       {kind === 'loading'
