@@ -26,6 +26,7 @@ A standalone garage resource for **Qbox (qbx_core)**, **QBCore (qb-core)** and *
    # permissions
    add_ace group.admin mdp_garages.admin allow     # /mdp_finereview <id> paid|void (server/fine_review.lua)
    add_ace group.admin command.mdp_migrate allow   # mdp_migrate in-game (always allowed from the console)
+   add_ace group.admin command.mdp_regularize allow # mdp_regularize <plate>: unmarked car -> garage
    ```
 4. Optional: migrate existing vehicles (below).
 
@@ -61,6 +62,7 @@ local ok, info = exports.mdp_garages:AddVehicle(owner, plate, model, props, gara
 | Command | Who | Description |
 |---|---|---|
 | `mdp_migrate` | console, or ace `command.mdp_migrate` (`add_ace group.admin command.mdp_migrate allow`) | import from the framework vehicle table |
+| `mdp_regularize <plate>` | console, or ace `command.mdp_regularize` | delete empty unmarked entities with that plate and send the car to its last garage (or `Config.DefaultGarage`) |
 | `mdp_recover` | console | re-run startup recovery after fixing a DB problem (the resource answers `not_ready` until it succeeds) |
 | `/mdp_finereview <id> paid\|void` | ace `mdp_garages.admin` | resolve `needs_review` fines (Integrations) |
 | `/mdp_payfine <id>` | players | pay a fine from the bank. Refused if the fine was sent as an invoice through a billing resource |
