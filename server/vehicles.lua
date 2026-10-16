@@ -97,7 +97,7 @@ function Vehicles.InsertBatch(rows)
             -- R4-1: an imported OUT row without a live entity would be stuck -> GARAGED in its garage
             if r.state == VS.OUT and (not e or tonumber(e.state) == VS.REMOVED) then
                 worldPlates = worldPlates or Utils.WorldVehiclesByPlate()
-                if not worldPlates[r.plate] then
+                if not Utils.UniqueWorldVehicle(worldPlates, r.plate, Utils.ModelHash(r.model)) then
                     r.state = VS.GARAGED
                     r.garage_id = r.garage_id or Config.DefaultGarage
                 end
@@ -107,8 +107,9 @@ function Vehicles.InsertBatch(rows)
                 local n = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, owner = ?, garage_id = ? WHERE plate = ? AND state = ?',
                     { r.state == VS.OUT and VS.OUT or VS.GARAGED, r.owner, r.garage_id or Config.DefaultGarage, r.plate, VS.REMOVED })
                 if n == 1 then
-                    print(('^3[mdp_garages] %s restored from REMOVED (reappeared in framework for %s)^0'):format(r.plate, tostring(r.owner)))
-                    if e.owner ~= r.owner then onOwnerChanged(r.plate, e.owner, r.owner) end
+                    -- R5-4: a restored vehicle never keeps old shared keys (same or new owner)
+                    MySQL.update.await('DELETE FROM mdp_vehicle_keys WHERE plate = ?', { r.plate })
+                    print(('^3[mdp_garages] %s restored from REMOVED (reappeared in framework for %s); shared keys cleared^0'):format(r.plate, tostring(r.owner)))
                     inserted = inserted + 1
                 end
             elseif not e then
@@ -260,6 +261,18 @@ function Vehicles.AddVehicle(owner, plate, model, props, garageId)
             [[INSERT IGNORE INTO mdp_vehicles (plate, owner, model, vtype, props, state, garage_id, source)
               VALUES (?, ?, ?, ?, ?, ?, ?, 'mdp')]], { plate, owner, model, vtype, propsJson, initialState, garageId })
         if not ok then return false, 'db_error' end
+    elseif tonumber(cur.state) == VS.REMOVED then
+        -- R5-1: restore a soft-deleted vehicle for the (new) owner; R5-4: clear old shared keys
+        local okR, n = pcall(MySQL.update.await, [[UPDATE mdp_vehicles SET state = ?, owner = ?, garage_id = ?, model = ?, vtype = ?,
+            props = COALESCE(?, props), source = 'mdp', coords = NULL, parked_at = NULL WHERE plate = ? AND state = ?]],
+            { initialState, owner, garageId, model, vtype, propsJson, plate, VS.REMOVED })
+        if not okR then return false, 'db_error' end
+        if n ~= 1 then return false, 'transfer_deferred' end
+        MySQL.update.await('DELETE FROM mdp_vehicle_keys WHERE plate = ?', { plate })
+        print(('^3[mdp_garages] %s restored from REMOVED by AddVehicle for %s (was %s); shared keys cleared^0'):format(plate, owner, tostring(old)))
+        local src = Vehicles.FindSourceByIdentifier and Vehicles.FindSourceByIdentifier(owner)
+        if src then CreateThread(function() Vehicles.SyncPlayer(src, true) end) end
+        return true, 'restored'
     elseif old ~= owner then
         -- R3-3: transfer only when garaged / world-parked
         local okU, n = pcall(MySQL.update.await, 'UPDATE mdp_vehicles SET owner = ? WHERE plate = ? AND owner = ? AND state IN (?, ?)',

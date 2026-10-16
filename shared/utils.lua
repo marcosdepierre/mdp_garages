@@ -125,12 +125,12 @@ function Utils.ErrorText(code)
     return ui['err_' .. Utils.ErrorCode(code)] or ui.error or tostring(code)
 end
 
---- Server: true if no ped sits in any seat of the vehicle.
-function Utils.IsVehicleEmpty(veh)
+--- Server: true if no ped sits in any seat of the vehicle (optionally ignoring one ped, e.g. a dropping player).
+function Utils.IsVehicleEmpty(veh, ignorePed)
     local seats = (GetVehicleMaxNumberOfPassengers and GetVehicleMaxNumberOfPassengers(veh)) or 6
     for seat = -1, seats - 1 do
         local ped = GetPedInVehicleSeat(veh, seat)
-        if ped and ped ~= 0 then return false end
+        if ped and ped ~= 0 and ped ~= ignorePed then return false end
     end
     return true
 end
@@ -146,12 +146,26 @@ function Utils.OnlyDriverInside(veh, driverPed)
     return true
 end
 
---- Server: map of normalized plate -> entity for all live world vehicles (O(n), call once per batch).
+--- Server: map of normalized plate -> { entities } for all live world vehicles (O(n), call once per batch).
 function Utils.WorldVehiclesByPlate()
     local map = {}
     for _, veh in ipairs(GetAllVehicles()) do
         local p = Utils.NormalizePlate(GetVehicleNumberPlateText(veh))
-        if p and p ~= '' then map[p] = veh end
+        if p and p ~= '' then
+            map[p] = map[p] or {}
+            map[p][#map[p] + 1] = veh
+        end
     end
     return map
+end
+
+--- From a WorldVehiclesByPlate map: the entities with this plate AND model hash.
+--- Returns ent (only when exactly one matches), matchCount.
+function Utils.UniqueWorldVehicle(map, plate, modelHash)
+    local found, n = nil, 0
+    for _, veh in ipairs(map[plate] or {}) do
+        if GetEntityModel(veh) == modelHash then found = veh; n = n + 1 end
+    end
+    if n == 1 then return found, 1 end
+    return nil, n
 end

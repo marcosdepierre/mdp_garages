@@ -98,12 +98,16 @@ local function onStart()
     --   c) our tagged entities (mdp_plate) whose row is not 0/2 -> orphan, deleted
     local world = Utils.WorldVehiclesByPlate()
     local rows = MySQL.query.await('SELECT plate, model, state FROM mdp_vehicles WHERE state IN (?, ?)', { VS.OUT, VS.PARKED_WORLD }) or {}
-    local wanted, adopted, parked, garaged = {}, 0, 0, 0
+    local wanted, dupPlates, adopted, parked, garaged = {}, {}, 0, 0, 0
     local mode = Config.OnRestartOutVehicles or 'park'
     for _, r in ipairs(rows) do
         local plate, st = r.plate, tonumber(r.state)
-        local ent = world[plate]
-        if ent and GetEntityModel(ent) ~= Utils.ModelHash(r.model) then ent = nil end
+        -- R5-3: adopt only if exactly ONE live entity matches plate AND model; duplicates -> adopt none, keep them
+        local ent, matches = Utils.UniqueWorldVehicle(world, plate, Utils.ModelHash(r.model))
+        if matches > 1 then
+            dupPlates[plate] = true
+            print(('^3[mdp_garages] restart: %d world entities match %s (plate+model); none adopted, duplicates left untouched^0'):format(matches, plate))
+        end
         if ent then
             wanted[plate] = true
             Entity(ent).state:set('mdp_plate', plate, true)
@@ -111,7 +115,8 @@ local function onStart()
             adopted = adopted + 1
             if st == VS.OUT then
                 local c, h = GetEntityCoords(ent), GetEntityHeading(ent)
-                if mode == 'garage' then
+                -- R5-2: 'garage' never deletes an occupied vehicle -> falls back to the 'park' logic
+                if mode == 'garage' and Utils.IsVehicleEmpty(ent) then
                     local n = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, garage_id = ?, engine = ?, body = ?, coords = NULL WHERE plate = ? AND state = ?',
                         { VS.GARAGED, Config.DefaultGarage, GetVehicleEngineHealth(ent), GetVehicleBodyHealth(ent), plate, VS.OUT })
                     if n == 1 then Security.UntrackSpawn(plate); DeleteEntity(ent); wanted[plate] = nil; garaged = garaged + 1 end
@@ -129,7 +134,7 @@ local function onStart()
     end
     local orphans = 0
     forEachOwnEntity(function(veh, plate)
-        if not wanted[plate] and Utils.IsVehicleEmpty(veh) then DeleteEntity(veh); orphans = orphans + 1 end
+        if not wanted[plate] and not dupPlates[plate] and Utils.IsVehicleEmpty(veh) then DeleteEntity(veh); orphans = orphans + 1 end
     end)
     print(('[mdp_garages] restart recovery: %d entities adopted, %d OUT -> parked_world, %d OUT -> %s, %d orphan entities removed')
         :format(adopted, parked, garaged, Config.DefaultGarage, orphans))
@@ -205,6 +210,7 @@ end)
 local function healthOf(veh) return GetVehicleEngineHealth(veh), GetVehicleBodyHealth(veh) end
 
 local function toGarage(plate, veh)
+    if not Utils.IsVehicleEmpty(veh) then return false end -- R5-2: never delete with someone inside
     local engine, body = healthOf(veh)
     local n = MySQL.update.await([[UPDATE mdp_vehicles SET state = ?, garage_id = ?, engine = ?, body = ?, coords = NULL, parked_at = NULL
         WHERE plate = ? AND state IN (?, ?)]], { VS.GARAGED, Config.DefaultGarage, engine, body, plate, VS.OUT, VS.PARKED_WORLD })
@@ -212,9 +218,14 @@ local function toGarage(plate, veh)
     return n == 1
 end
 
-local function applyPolicy(plate, veh, mode)
+local function applyPolicy(plate, veh, mode, droppedPed)
     local c, h = GetEntityCoords(veh), GetEntityHeading(veh)
     local engine, body = healthOf(veh)
+    -- R5-2: never delete a vehicle with someone (other than the dropping player) inside -> 'keep'/park logic
+    if (mode == 'garage' or mode == 'impound') and not Utils.IsVehicleEmpty(veh, droppedPed) then
+        print(('^3[mdp_garages] disconnect policy %s for %s: vehicle occupied, parking it instead^0'):format(mode, plate))
+        mode = 'keep'
+    end
     if mode == 'garage' then
         toGarage(plate, veh)
     elseif mode == 'impound' then
@@ -235,8 +246,8 @@ local function applyPolicy(plate, veh, mode)
 end
 
 --- Runs the policy under the plate lock; if the lock is busy (e.g. a takeOut in progress) log and retry (R3-7).
-function MDP.ApplyDisconnectPolicy(plate, veh, mode, attempt)
-    local ok, r1, r2 = pcall(Security.WithLock, plate, 0, applyPolicy, plate, veh, mode)
+function MDP.ApplyDisconnectPolicy(plate, veh, mode, attempt, droppedPed)
+    local ok, r1, r2 = pcall(Security.WithLock, plate, 0, applyPolicy, plate, veh, mode, droppedPed)
     if not ok then
         print(('^1[mdp_garages] disconnect policy failed for %s: %s^0'):format(plate, tostring(r1)))
     elseif r1 == false and r2 == 'locked' then
@@ -246,7 +257,7 @@ function MDP.ApplyDisconnectPolicy(plate, veh, mode, attempt)
         end
         print(('^3[mdp_garages] disconnect policy for %s: plate locked, retry %d in 2 s^0'):format(plate, attempt))
         SetTimeout(2000, function()
-            if DoesEntityExist(veh) then MDP.ApplyDisconnectPolicy(plate, veh, mode, attempt + 1) end
+            if DoesEntityExist(veh) then MDP.ApplyDisconnectPolicy(plate, veh, mode, attempt + 1, droppedPed) end
         end)
     end
 end
@@ -260,7 +271,7 @@ function Security.OnPlayerDropped(src, identifier, plates, reason)
         if veh then
             local driver = GetPedInVehicleSeat(veh, -1)
             local wasDriving = (ped and ped ~= 0 and driver == ped) or ((not ped or ped == 0) and (driver == 0 or not driver))
-            if wasDriving then MDP.ApplyDisconnectPolicy(plate, veh, mode, 1) end
+            if wasDriving then MDP.ApplyDisconnectPolicy(plate, veh, mode, 1, ped) end
         end
     end
 end

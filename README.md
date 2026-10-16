@@ -45,7 +45,8 @@ ALTER TABLE owned_vehicles ADD INDEX idx_owner (owner);
 
 ## Exports (server)
 ```lua
--- returns ok:boolean, info?:string ('exists' | 'transferred') or err
+-- returns ok:boolean, info?:string ('exists' | 'transferred' | 'restored') or err
+-- 'restored': the plate was soft-deleted (state 5) and is restored for this owner; its old shared keys are cleared
 local ok, info = exports.mdp_garages:AddVehicle(owner, plate, model, props, garageId)
 -- owner: ESX identifier / QB citizenid · plate: 1-8 chars [A-Z0-9 ] · model: spawn name
 -- props: table or JSON (optional) · garageId: 'public:<id>' (optional, defaults to Config.DefaultGarage),
