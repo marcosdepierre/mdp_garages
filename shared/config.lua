@@ -120,6 +120,12 @@ Config.SnapshotTokenTtlMs = 5000
 -- takeOut of a world-parked car (state 2) is refused if it moved more than this (m) from its stored coords · number · 5.0
 -- Store/park with a shared key instead of being the owner · boolean · false (reserved for phase 3; keys are for driving only)
 Config.AllowSharedKeyStore = false
+-- Adopt an UNMARKED dealership/script car on its owner's first store (state OUT, never managed, row < 30 min old,
+-- driver = owner, script entity). Mitigations are hard-coded; only this toggle is configurable · boolean · true
+-- (legacy alias: Config.AdoptUnmarkedOnFirstStore)
+Config.AllowFirstStoreAdoption = true
+-- Resources allowed to call exports.mdp_garages:RegisterExternalVehicle (empty = export disabled) · string[] · {}
+Config.TrustedResources = {}
 Config.ParkedMoveTolerance = 5.0
 -- Max world-parked vehicles per player; at the limit parking is refused · integer · 5
 Config.MaxWorldParkedPerPlayer = 5

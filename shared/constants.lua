@@ -39,4 +39,4 @@ for _, c in ipairs({
 }) do Constants.ErrorCodes[c] = true end
 
 -- Schema version expected by this code (mdp_schema_version)
-Constants.SchemaVersion = 4
+Constants.SchemaVersion = 5

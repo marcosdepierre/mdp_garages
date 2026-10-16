@@ -142,7 +142,14 @@ function MDP.Props.SpawnVehicle(row, x, y, z, heading, ownerSrc)
     local netId = NetworkGetNetworkIdFromEntity(veh)
     Security.TrackSpawn(row.plate, netId, ownerSrc)
     MDP.Props.StampMileage(row.plate)
+    MDP.Props.MarkManaged(row.plate)
     return veh, netId
+end
+
+--- v5: first time mdp manages a plate (spawn/store/park/adopt). Returns affectedRows (1 = first time).
+function MDP.Props.MarkManaged(plate)
+    local ok, n = pcall(MySQL.update.await, 'UPDATE mdp_vehicles SET managed_at = NOW() WHERE plate = ? AND managed_at IS NULL', { plate })
+    return ok and n or 0
 end
 
 --- Permanent keys AFTER the entity exists (qbx_vehiclekeys needs the entity). Never throws.

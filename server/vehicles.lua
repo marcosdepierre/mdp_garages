@@ -123,7 +123,7 @@ function Vehicles.InsertBatch(rows)
                     inserted = inserted + 1
                 end
             elseif not e then
-                ph[#ph + 1] = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'framework')"
+                ph[#ph + 1] = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'framework', NOW())" -- managed_at: imports are never adoptable
                 -- explicit indices: props/garage_id may be nil (ipairs would stop early)
                 local vals = { r.plate, r.owner, r.model, (Config.VehicleTypes or {})[r.model] or r.vtype or 'automobile',
                                r.props, r.state, r.garage_id, r.fuel, r.engine, r.body }
@@ -143,7 +143,7 @@ function Vehicles.InsertBatch(rows)
         end
         if #ph > 0 then
             inserted = inserted + (MySQL.update.await(
-                'INSERT IGNORE INTO mdp_vehicles (plate, owner, model, vtype, props, state, garage_id, fuel, engine, body, source) VALUES '
+                'INSERT IGNORE INTO mdp_vehicles (plate, owner, model, vtype, props, state, garage_id, fuel, engine, body, source, managed_at) VALUES '
                 .. table.concat(ph, ', '), params) or 0)
         end
     end

@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS `mdp_vehicles` (
   `source`      VARCHAR(16)  NOT NULL DEFAULT 'mdp' COMMENT 'framework = imported by sync/migrate (eligible for SyncRemovals); mdp = AddVehicle/own',
   `garage_id`   VARCHAR(64)  NULL COMMENT 'public|private|impound:<id>',
   `parked_at`   TIMESTAMP    NULL DEFAULT NULL COMMENT 'when state became parked_world (inactivity retire, phase 7)',
+  `managed_at`  DATETIME     NULL DEFAULT NULL COMMENT 'first time mdp spawned/stored/parked/adopted it (v5; NULL = never managed)',
   `created_at`  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at`  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
@@ -118,6 +119,6 @@ CREATE TABLE IF NOT EXISTS `mdp_schema_version` (
   PRIMARY KEY (`version`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-INSERT IGNORE INTO `mdp_schema_version` (`version`) VALUES (1), (2), (3), (4);
+INSERT IGNORE INTO `mdp_schema_version` (`version`) VALUES (1), (2), (3), (4), (5);
 -- v2: mdp_vehicles.vtype. v3: mdp_vehicles.source. v4: no FK mdp_fines -> mdp_vehicles; state 5 REMOVED. Existing v1 installs are upgraded automatically on resource start
 -- (server/persistence.lua) or manually with sql/upgrade_v2.sql.

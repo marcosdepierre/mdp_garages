@@ -130,5 +130,8 @@ See docs/architecture.md (Phase 1 security re-review) and docs/security.md.
 - **Owner-only store/park:** only the owner's own, server-spawned vehicle can be stored/parked (keys don't count). Cars spawned before a8fda43 or by other scripts carry no server mark and are refused with "This is not the registered vehicle". Fix them with the admin command `mdp_regularize <plate>` (sends the car to its last garage, deleting the empty unmarked entity). Add `add_ace group.admin command.mdp_regularize allow`.
 
 ### Dealerships
-- Preferred: `exports.mdp_garages:AddVehicle(owner, plate, model, props?, 'public:legion')` then the player takes it out from that garage.
-- Or spawn it for the buyer: `local netId, err = exports.mdp_garages:SpawnOwnedVehicle(plate, vector4(x, y, z, h), src)` (server only; row must exist, owned by `src`, state GARAGED/OUT and not already spawned). The vehicle gets the server mark, so it can be stored/parked later. Do **not** spawn the car with your own `CreateVehicle`: unmarked cars can't be stored (`vehicle_mismatch`, see `mdp_regularize`).
+1. **Primary:** `local netId, err = exports.mdp_garages:SpawnOwnedVehicle(plate, vector4(x, y, z, h), src)` after `AddVehicle(owner, plate, model, props?, 'out')` (server only). The car gets the server mark and can be stored/parked later.
+2. Or `AddVehicle(owner, plate, model, props?, 'public:legion')` and the player takes it out from that garage.
+3. If your dealership spawns the car itself: the owner's **first store** adopts it (`Config.AllowFirstStoreAdoption = true`, within 30 min of `AddVehicle`, owner driving, script-spawned entity), or call `exports.mdp_garages:RegisterExternalVehicle(netId, plate)` within 60 s of `AddVehicle` after adding your resource to `Config.TrustedResources`.
+Unmarked cars outside these rules are refused (`vehicle_mismatch`); fix them with `mdp_regularize <plate>`.
+- **Schema v5:** `managed_at` is added automatically on start (no manual SQL); existing vehicles are backfilled so none becomes adoptable after upgrading.

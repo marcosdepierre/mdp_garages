@@ -81,7 +81,16 @@ local function upgradeSchema()
         MySQL.query.await(('ALTER TABLE `mdp_fines` DROP FOREIGN KEY `%s`'):format(fk))
         print('[mdp_garages] schema upgrade v4: dropped FK ' .. fk .. ' (fines no longer cascade with vehicles)')
     end
-    MySQL.insert.await('INSERT IGNORE INTO mdp_schema_version (version) VALUES (1), (2), (3), (4)')
+    -- v5: managed_at (first-store adoption guard). Backfill once, when the column is created: rows that mdp already
+    -- managed (ever garaged/parked/impounded, or with mdp props/coords) get managed_at = updated_at.
+    if hasTable('mdp_vehicles') and not hasColumn('mdp_vehicles', 'managed_at') then
+        MySQL.query.await("ALTER TABLE `mdp_vehicles` ADD COLUMN `managed_at` DATETIME NULL DEFAULT NULL AFTER `parked_at`")
+        local n = MySQL.update.await([[UPDATE mdp_vehicles SET managed_at = updated_at WHERE managed_at IS NULL
+            AND (state IN (1, 2, 3) OR props IS NOT NULL OR coords IS NOT NULL OR source = 'framework'
+                 OR created_at IS NULL OR created_at < NOW() - INTERVAL 30 MINUTE)]])
+        print(('[mdp_garages] schema upgrade v5: managed_at added, %d rows backfilled'):format(n or 0))
+    end
+    MySQL.insert.await('INSERT IGNORE INTO mdp_schema_version (version) VALUES (1), (2), (3), (4), (5)')
 end
 
 local function onStart()
