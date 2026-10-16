@@ -405,3 +405,41 @@ Primera sincronización = no adoptable, y luego pasa a ser conocido. `mdp_migrat
 
 ## Veredicto
 Los requisitos de adopción y del export se cumplen salvo **AD-1** (valor por defecto) y **AD-2** (ventana de fecha), que hay que arreglar antes de cerrar la fase 1, y **AD-4** (duplicado en `SpawnOwnedVehicle`). AD-3, AD-5 y AD-6 son Bajos o informativos.
+
+---
+
+# Re-revisión 6 — commit `677f577` (16/10/2026, 23:15 UTC+1)
+
+## Verificación de los arreglos de la re-revisión 5
+| ID | Estado | Comprobación |
+|---|---|---|
+| AD-1 | Pendiente (no incluido en el commit) | `Config.AllowFirstStoreAdoption` sigue a `true`. Lo rebajo a Bajo: las mitigaciones 2-7 son fijas y AD-2/AD-3 ya están cerrados. Recomiendo `false` por defecto antes del release. |
+| AD-2 | **Cerrado** | Solo `datetime`/`timestamp` (`information_schema.DATA_TYPE`); `fwHasDate` sin valor → no adoptable; se exige `-300 <= age <= 1800`. Además `created_at <= NOW()` en la ventana mdp (M5). |
+| AD-3 | **Cerrado** | `adoptUnmarked` rechaza si `IsTrackedEntity` devuelve una matrícula (cualquiera), si `PlateOfEntity`, si existe `mdp_plate` o `mdp_srv ~= nil`, si `IsServerEntity` o si `GetSpawnedEntity(plate)`. |
+| AD-4 | **Cerrado** | `liveEntityConflict` recorre el pool en `takeOut` (excluyendo la entidad aparcada trackeada) y en `SpawnOwnedVehicle`; los dos exports pasan por `isTrusted` (nunca nuestro propio recurso). |
+| AD-5 | **Cerrado** | Si la consulta falla: olvida la columna, reintenta una vez sin ella y fuerza `adoptable = false`. |
+| Rate limit de RegisterExternalVehicle | OK | 10 llamadas / 60 s por recurso, con ventana fija. |
+| Nombres de opts | **Coinciden exactamente** | `allowDriver`, `allowKeys`, `states`, `requireDriver`, `requireEmpty`, `maxDistance`, `plate`, `row` = los que lee `Security.CanStoreOwnVehicle`. Mapeo de errores `not_driver`/`occupied`/`invalid_*` correcto. |
+| M2 `/mdp_regularize` | OK | Rechaza los estados 3/4 y las multas impagadas. |
+
+## Transferencias y revocación de llaves (P1-OWN-H1)
+Bien resuelto:
+- `ApplyTransfer` es atómico (`UPDATE … WHERE owner = old AND state <> 5` y comprueba `n == 1`). Una transferencia concurrente pierde y no hace nada.
+- Se aplica en cualquier estado vivo. No permite autotransferirse la propiedad: el nuevo dueño viene de la tabla del framework, o de `AddVehicle`, que valida el `owner` (string, de 1 a 64) y la matrícula.
+- Dentro del lock de guardar/aparcar se compara con el dueño del framework; si no coincide, `not_owner` y se resincroniza.
+- La entidad sigue trackeada y la reclama el comprador.
+
+### Hallazgos
+**TR-1 (Medio) — TOCTOU entre la transferencia y take-out/store/park.** `ApplyTransfer` se ejecuta **fuera** del lock de la matrícula (sync/`AddVehicle`). Los UPDATE de estado de `takeOut` (`garages.lua:138/141`), store (`:455`) y park (`:501`) solo condicionan `state`, no `owner`. El vendedor puede pasar la comprobación de dueño dentro de su lock, que entre la transferencia, y que su take-out siga adelante: saca el coche ya vendido y su entidad queda trackeada a su nombre. *Arreglo (cualquiera de los dos):* añadir `AND owner = ?` (`row.owner`) a esos UPDATE y tratar `affected == 0` como `not_owner`; o ejecutar `ApplyTransfer` dentro de `Security.WithLock(plate, nil, …)`, si el lock lo permite (lo preferible son las dos cosas).
+
+**TR-2 (Medio) — Revocación incompleta de llaves temporales o de puente.** `RemoveKeys` solo se llama al **vendedor online**. Las llaves temporales, compartidas o de puente que otros jugadores tienen en el recurso de llaves (qb-vehiclekeys, qs, wasabi…) y las del vendedor desconectado en recursos con persistencia no se revocan. *Arreglo:* recorrer los jugadores online y llamar a `Bridge.Keys.RemoveKeys(s, ent or plate)` para cada uno salvo el comprador. Si el bridge lo expone, usar `Bridge.Keys.RevokeAll(plate)`. Documentar que la persistencia offline depende del recurso de llaves.
+
+**TR-3 (Bajo) — Fallos silenciosos.** El `DELETE` de `mdp_vehicle_keys` va dentro de un `pcall` y su error se ignora: la transferencia queda aplicada con las llaves vivas y sin rastro. *Arreglo:* registrar el error y reintentar, o hacer el DELETE y el UPDATE en una transacción (`MySQL.transaction.await`).
+
+**TR-4 (Bajo) — Coherencia con el framework.** `FrameworkOwner` usa `UPPER(TRIM(plate)) … LIMIT 1`. Si hay dos filas del framework que se normalizan igual, el dueño es arbitrario y puede alternar en cada guardado. *Arreglo:* si hay más de un resultado, no transferir y registrarlo (`framework_plate_ambiguous`). Validar también que `fwOwner` sea un string no vacío de 64 caracteres como máximo antes de `ApplyTransfer`.
+
+**TR-5 (Bajo) — Autotransferencia y auditoría.** `ApplyTransfer(plate, X, X)` coincide con una fila (oxmysql cuenta las filas encontradas) y revoca todas las llaves (DoS menor desde `AddVehicle`). *Arreglo:* `if oldOwner == newOwner then return false end`. El registro es solo `print`: usar `Security.Log('AUDIT', 'transfer', …)` (con la matrícula, el dueño anterior, el nuevo y el origen: sync, add o lock).
+
+## Veredicto
+No quedan bloqueantes Críticos ni Altos. N1, N10, P1-OWN-H1/H2 y AD-2 a AD-5 están cerrados.
+Antes de cerrar la fase 1 hay que arreglar **TR-1** (UPDATE condicionados al dueño; es pequeño) y **TR-2** (revocar las llaves a todos los jugadores online). Son Medios, pero afectan directamente a la regla «solo vehículos propios». Con esos dos aplicados, la fase 1 puede cerrarse en el plano de seguridad; AD-1 y TR-3 a TR-5 pueden ir a la fase 2.
