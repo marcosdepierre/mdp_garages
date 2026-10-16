@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Button } from '@/components/base/buttons/button';
 import { Dialog, Modal, ModalOverlay } from '@/components/application/modals/modal';
 import { XClose } from '@untitledui/icons';
+import { TableCard } from '@/components/application/table/table';
 import { I18nContext, makeT } from '@/i18n';
 import { fetchNui } from '@/nui/fetchNui';
 import { isInGame } from '@/nui/env';
@@ -9,6 +10,7 @@ import { useNuiMessages } from '@/nui/useNuiMessages';
 import { useRouter } from '@/router';
 import { PANEL_H, PANEL_W, useAppScale } from '@/scale';
 import type { LocaleTable, OpenData } from '@/types';
+import { visibleVehicles } from '@/types';
 import { DetailView } from '@/views/DetailView';
 import { ListView } from '@/views/ListView';
 import { Empty } from '@/views/Empty';
@@ -67,20 +69,23 @@ export default function App() {
 
   useEffect(() => {
     if (import.meta.env.DEV && !isInGame) {
-      void import('@/dev/mock').then(({ mockOpenMessage }) => window.postMessage(mockOpenMessage(), '*'));
+      // Dev: ?view=detail&plate=MDP001 opens the detail directly (used for screenshots).
+      const q = new URLSearchParams(location.search);
+      void import('@/dev/mock').then(({ mockOpenMessage, garages }) =>
+        window.postMessage(mockOpenMessage(garages[0], q.get('view') === 'detail' ? 'detail' : 'list', q.get('plate') ?? undefined), '*'));
     }
   }, []);
 
   const route = router.route;
   const title = data?.garage?.label ?? t('title');
-  const vehicleCount = data?.vehicles?.length ?? 0;
+  const vehicleCount = visibleVehicles(data?.vehicles).length;
   const selectedPlate = route.name === 'detail' ? (route.params?.plate as string | undefined) : undefined;
 
   return (
     <I18nContext.Provider value={t}>
       <ModalOverlay isOpen={visible && !!data} isDismissable={false} isKeyboardDismissDisabled className="bg-transparent backdrop-blur-none p-0 sm:p-0">
         <Modal
-          className="shrink-0 overflow-hidden bg-primary shadow-2xl ring-1 ring-secondary max-h-none sm:rounded-2xl"
+          className="shrink-0 overflow-hidden [color-scheme:dark] bg-primary shadow-2xl ring-1 ring-secondary max-h-none sm:rounded-2xl"
           style={{ width: PANEL_W, height: PANEL_H, transform: `scale(${scale})` }}
         >
           <Dialog aria-label={title} className="flex h-full flex-col">
@@ -91,14 +96,14 @@ export default function App() {
               </div>
               <Button size="md" color="secondary" iconLeading={XClose} aria-label={t('close')} onClick={() => void requestClose()} />
             </header>
-            <div className="grid min-h-0 flex-1 grid-cols-[440px_1fr] gap-6 px-8 pb-8">
+            <div className="grid min-h-0 flex-1 grid-cols-[520px_1fr] gap-6 px-8 pb-8">
               <div className="min-h-0 overflow-auto pr-1">
                 {data && <ListView data={data} router={router} selected={selectedPlate} />}
               </div>
-              <div className="min-h-0 overflow-auto rounded-xl border border-secondary bg-secondary p-6">
+              <div className="min-h-0 overflow-auto">
                 {data && (route.name === 'detail'
                   ? <DetailView data={data} plate={selectedPlate} onTakenOut={hide} />
-                  : <Empty title={t('select_vehicle')} />)}
+                  : <TableCard.Root size="sm" className="h-full"><Empty title={t('select_vehicle')} /></TableCard.Root>)}
               </div>
             </div>
           </Dialog>

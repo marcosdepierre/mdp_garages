@@ -8,7 +8,8 @@ import { errorKey, useT } from '@/i18n';
 import { fetchNui } from '@/nui/fetchNui';
 import { stateMeta } from '@/state';
 import type { NuiErrorCode, OpenData } from '@/types';
-import { VehicleState, isValidPlate, normalizeError } from '@/types';
+import { VehicleState, isValidPlate, normalizeError, visibleVehicles } from '@/types';
+import { Table, TableCard } from '@/components/application/table/table';
 import { cx } from '@/utils/cx';
 import { Empty } from './Empty';
 import { clampPct, statColor } from './stats';
@@ -17,7 +18,7 @@ export function DetailView({ data, plate, onTakenOut }: { data: OpenData; plate?
   const t = useT();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<NuiErrorCode | undefined>();
-  const v = plate && isValidPlate(plate) ? data.vehicles?.find((x) => x.plate === plate) : undefined;
+  const v = plate && isValidPlate(plate) ? visibleVehicles(data.vehicles).find((x) => x.plate === plate) : undefined;
 
   if (!v) return <Empty title={t('select_vehicle')} />;
 
@@ -43,21 +44,20 @@ export function DetailView({ data, plate, onTakenOut }: { data: OpenData; plate?
     { key: 'fuel', n: clampPct(v.fuel) },
   ];
 
-  return (
-    <div className="flex h-full flex-col gap-6">
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-3">
-          <h2 className="truncate font-display text-display-md font-bold uppercase text-primary">{v.label}</h2>
-          <BadgeWithDot type="pill-color" size="md" color={meta.color}>{t(meta.key)}</BadgeWithDot>
-        </div>
-        <p className="text-sm text-tertiary">
-          {t('plate')} <span className="font-mono text-secondary">{v.plate}</span>
-          {' · '}{t(v.is_owner ? 'owner' : 'key_holder')}
-          {' · '}{t('mileage')} {Math.round(Number(v.mileage) || 0)} {v.mileage_unit}
-        </p>
-      </div>
+  const rows = [
+    { id: 'plate', k: t('plate'), node: <span className="font-mono text-primary">{v.plate}</span> },
+    { id: 'owner', k: t('owner'), node: <BadgeWithDot type="pill-color" size="sm" color={v.is_owner ? 'brand' : 'gray'}>{t(v.is_owner ? 'owner' : 'key_holder')}</BadgeWithDot> },
+    { id: 'mileage', k: t('mileage'), node: <span className="font-mono text-primary">{`${Math.round(Number(v.mileage) || 0)} ${v.mileage_unit}`}</span> },
+  ];
 
-      <div className="grid grid-cols-3 gap-4">
+  return (
+    <TableCard.Root size="sm" className="flex h-full flex-col">
+      <TableCard.Header
+        title={v.label}
+        className="[&_h2]:font-display [&_h2]:text-display-xs [&_h2]:font-bold [&_h2]:uppercase"
+        badge={<BadgeWithDot type="pill-color" size="md" color={meta.color}>{t(meta.key)}</BadgeWithDot>}
+      />
+      <div className="grid grid-cols-3 gap-4 px-4 py-5">
         {stats.map(({ key, n }) => (
           <div key={key} className="flex flex-col gap-1.5">
             <div className="flex justify-between">
@@ -68,15 +68,27 @@ export function DetailView({ data, plate, onTakenOut }: { data: OpenData; plate?
           </div>
         ))}
       </div>
-
+      <Table aria-label={v.label} size="sm">
+        <Table.Header className="sr-only">
+          <Table.Head id="k" isRowHeader label={t('details')} />
+          <Table.Head id="v" label={t('details')} />
+        </Table.Header>
+        <Table.Body items={rows}>
+          {(r) => (
+            <Table.Row id={r.id}>
+              <Table.Cell className="text-tertiary">{r.k}</Table.Cell>
+              <Table.Cell>{r.node}</Table.Cell>
+            </Table.Row>
+          )}
+        </Table.Body>
+      </Table>
       {/* Alerts are PRO → error shown with a FREE Badge. */}
-      {error ? <Badge type="pill-color" size="lg" color="error">{t(errorKey(error))}</Badge> : null}
-
-      <div className="mt-auto flex gap-3">
+      {error ? <div className="px-4 pt-4"><Badge type="pill-color" size="lg" color="error">{t(errorKey(error))}</Badge></div> : null}
+      <div className="mt-auto flex gap-3 p-4">
         <Button color="primary" size="lg" className="flex-1" iconTrailing={CornerDownLeft} isLoading={busy} isDisabled={!canTakeOut} onClick={takeOut}>
           {t('take_out')}
         </Button>
       </div>
-    </div>
+    </TableCard.Root>
   );
 }
