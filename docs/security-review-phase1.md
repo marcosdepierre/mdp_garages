@@ -98,3 +98,72 @@ Añadir `props = Security.Optional(function(v) return type(v) == 'table' end)` a
 5. `Security.TrackSpawn(plate, netId, nil)` y state bag `mdp_plate` tras confirmar `DoesEntityExist`.
 6. Antes de spawnear, comprobar `Utils.WorldVehiclesByPlate` / `UniqueWorldVehicle` para no duplicar una entidad no trackeada con la misma matrícula y modelo (adoptar en lugar de spawnear).
 7. Rate de spawns global (p.ej. N por tick) para evitar picos de entidades.
+
+---
+
+# Re-revisión (16/10/2026, 22:40 UTC+1)
+
+Commits revisados: `e75117f`, `c5a8644`, `f77d546`, `c17d56c` (snapshot de props + tope de km). Líneas referidas a `c17d56c`.
+
+## Estado de los hallazgos
+
+| # | Estado | Evidencia / comentario |
+|---|---|---|
+| H1 | **Parcial** | `server/props.lua:130-139`: `SpawnVehicle` va en `pcall` y `garages.lua:139-150` hace rollback exacto. Falta una cosa: si `doSpawn` lanza un error **después** de `CreateVehicleServerSetter` (l.106-125: state bags, `RequestApply`), la entidad creada queda en el mundo sin trackear y con la matrícula ya puesta (l.112), y el rollback devuelve la fila a GARAGED/PARKED_WORLD → hay un coche fantasma duplicable. Ver N3. |
+| H2 | Corregido | `garages.lua:241-245, 322-323`: `MDP.Props.Sanitize` → `Security.SanitizeProps(props, row, veh, elapsed)` dentro del lock; se guarda el JSON saneado y `COALESCE` conserva las props anteriores si el cliente no manda props. |
+| M1 | Corregido | `garages.lua:130-136`: `DeleteEntity` del coche aparcado solo cuando `affected == 1`. |
+| M2 | Corregido | `garages.lua:144-147`: el rollback restaura PARKED_WORLD + coords/heading/parked_at y `Streamer.Track`. |
+| M3 | Corregido | `garages.lua:201-213, 231-237`: `lockedVehicleChecks` relee la fila, detecta clones y hace `TrackSpawn` dentro del lock. |
+| M4 | Corregido | `MDP.Props.Health` → `Security.ClampHealth` en garages, persistence y streamer. El fallback de `props.lua:13-17` usa 0..1000 para el motor (Security usa -4000..1000): unificar (Bajo). |
+| M5 | Corregido | `fines.lua`: el flag `charged` deja la multa en CHARGING si el error llega después del cobro. |
+| M6 | Corregido | `garages.lua:69-75, 108`: las multas se comprueban por `row.owner`. |
+| L1 | Corregido | `vehicles.lua` (AddVehicle): límite de 16 KB + `SanitizeProps`. |
+| L2 | Corregido | `vehicles.lua` `capProps`: no se importan props del framework de más de 16 KB; `MDP.Props.Decode` también ignora >16 KB. |
+| L3 | Abierto (backlog) | Aceptado. |
+| L4 | Corregido | `MDP.Props.ValidCoords` en parkWorld, persistence y streamer. |
+
+**Requisitos del streamer:** se cumplen el 1 (lock + `GetSpawnedEntity`), el 2 (relectura de PARKED_WORLD), el 3 (datos solo de BD), el 4 (pcall + backoff de 2 a 120 s), el 5 (TrackSpawn) y el 7 (5 spawns por tick). El **6 (adopción) queda parcial**: ver N1.
+
+**Snapshot de props (`c17d56c`):** se envía con `TriggerClientEvent` solo al dueño de red (`streamer.lua:138-152`), no por una state bag replicada. El token es de un solo uso (l.172), tiene TTL de 5 s (`Config.SnapshotTokenTtlMs`), se comprueba `NetworkGetEntityOwner(ent) == src` al responder (l.168), la entidad tiene que coincidir (`snap.veh ~= ent`), hay rate limit de 10 por 5 s y las props pasan por `SanitizeProps` dentro del lock. **Bien.** Quedan pendientes N2 y N6.
+
+## Nuevos hallazgos
+
+### High
+
+**N1 — La adopción del streamer acepta cualquier entidad con la misma matrícula y modelo, aunque esté ocupada o lejos**
+`server/streamer.lua:82-92` y `:179-186`. Un cliente puede crear su propio coche con el mismo modelo y ponerle la matrícula de un coche aparcado de otro jugador. Si en ese momento el original no está spawneado, el streamer lo adopta (`TrackSpawn` + `mdp_plate`). En el siguiente tick, `becameDriven` ve al conductor, pasa la fila a OUT y hace `ClaimSpawn` para el atacante. Resultado: el atacante se queda con el vehículo «oficial» del dueño (con las props de la BD aplicadas por la state bag) y el dueño ya no puede sacarlo (`already_out`).
+*Arreglo:* adoptar solo si (a) `Utils.IsVehicleEmpty(ent)`, (b) `#(GetEntityCoords(ent) - pos) <= Config.ParkedMoveTolerance` (las coords de BD) y (c) la entidad la creó el servidor (`GetEntityPopulationType(ent) == 7` / `NetworkGetEntityOwner` no relevante) o ya tenía `Entity(ent).state.mdp_plate == plate`. Si no se cumple: no adoptar, registrar con `LogReject` y aplicar `fail(plate)`.
+
+**N2 — Cualquier jugador cercano que sea dueño de red puede reescribir las props guardadas del coche de otro**
+`server/streamer.lua:103-113` y `:156-174`. El dueño de red de un coche aparcado es el cliente que esté más cerca, no el dueño del coche. Ese cliente puede contestar al snapshot con props arbitrarias dentro de la whitelist (mods, colores, neones, extras), que se guardan en el coche de otro jugador: tuneo gratis al reconectar, o borrar mods/colores para hacer griefing.
+*Arreglo:* en el snapshot de despawn, guardar **solo los campos que pueden cambiar con el coche aparcado**: `bodyHealth`, `engineHealth`, `tankHealth`, `dirtLevel`, `windows`, `doors`, `tyres`, `fuelLevel` (con tope ≤ BD). Para todo lo demás (mods, colores, extras, neones, livery, ruedas…), mantener los valores de la BD. Si el dueño de red es el dueño del coche o tiene llave, se puede aceptar todo. Implementación: `local clean = Security.SanitizeProps(...)` → fusionar sobre `MDP.Props.Decode(row.props)` solo las claves de la lista `Security.PropSnapshotFields` (ver abajo).
+
+### Medium
+
+**N3 — Error en `doSpawn` después de crear la entidad deja un coche fantasma**
+`server/props.lua:106-139`. Ver H1. *Arreglo:* que `doSpawn` publique la entidad en una variable externa antes de seguir (`created = veh`). En `SpawnVehicle`, si `not ok and created and DoesEntityExist(created)`, hacer `DeleteEntity(created)`.
+
+**N4 — `becameDriven` hace `ClaimSpawn` para cualquier conductor**
+`server/streamer.lua:176-188`. Un ladrón (puertas forzadas por otro script) pasa a ser el «dueño» de la sesión del coche. Las políticas de desconexión de `persistence.lua` se aplican entonces con su `src`, y el dueño ve `already_out`. *Arreglo:* hacer `ClaimSpawn` solo si `Security.IsOwner(id, plate)` (dueño o llave). Si no, dejar `src = nil` y registrarlo.
+
+**N5 — Tras un reinicio no hay referencia de tiempo para el tope de km**
+`server/props.lua:64-69`. `mileageStamp` está en memoria y `ElapsedSec` devuelve 0 si no hay marca. Los coches adoptados o en OUT después de un reinicio solo pueden sumar 0,5 km al guardar, así que se pierden km reales (es funcional, no un exploit). *Arreglo:* llamar a `StampMileage` también al adoptar (`persistence.lua` en el arranque, `streamer.lua:87-92`) y en `becameDriven`. Si no hay marca, usar `updated_at`/`parked_at` de la fila.
+
+### Low
+
+**N6 — Token generado con `math.random`**
+`server/streamer.lua:141`. Lua 5.4 siembra `math.random` al arrancar, pero no es un generador criptográfico. Como el token solo va al dueño de red y además se comprueba `NetworkGetEntityOwner`, el riesgo es bajo. *Arreglo opcional:* combinar con `GetGameTimer()` y un contador, o usar 2×31 bits.
+
+**N7 — Tablas en memoria sin purga**
+`server/streamer.lua:18` (`backoff`) solo se limpia con `Forget`, con un spawn correcto o con una adopción. Si una fila sale del registro por `Refresh` (l.41), su entrada sigue ahí. `server/props.lua:64` (`mileageStamp`) nunca se limpia. Ambas crecen como mucho con el número de matrículas (acotado), pero conviene purgar `backoff` en `Refresh` (borrar las claves que ya no estén en `fresh`) y `mileageStamp` en `Forget` / al pasar a GARAGED o IMPOUNDED.
+
+**N8 — Fallback de saneado de props demasiado débil**
+`server/props.lua:39-44`. Si `Security.SanitizeProps` no existe, se guardan las props sin whitelist. `security.lua` es un archivo obligatorio del manifest, así que conviene **fallar cerrado**: `return nil, 'invalid_props'`.
+
+**N9 — El despawn sin entrada en el registro borra el coche sin guardar posición ni daños**
+`server/streamer.lua:114-131`. Si `registry[plate]` es nil (por una carrera con `Refresh`), `moved`/`damaged` son nil y se borra el coche sin guardar nada. *Arreglo:* si `r == nil`, releer la fila (ya se hace con `snapProps`) y comparar contra ella.
+
+## Firmas acordadas (Security)
+- `Security.ClampMileage(plate, oldKm, newKm, elapsedSec) -> km, clamped` (backend: `props.lua:77` ✔).
+- `Security.SanitizeProps(props, dbRow, entity, elapsedSec) -> clean|nil, err, json` (backend: `props.lua:34` ✔).
+- Nuevo: `Security.PropSnapshotFields`, la lista de campos que un snapshot de un no-dueño puede actualizar (para N2).

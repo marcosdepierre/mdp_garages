@@ -394,6 +394,41 @@ for _, m in ipairs({ 'modSpoilers', 'modFrontBumper', 'modRearBumper', 'modSideS
 end
 Security.PropRules = PROP_RULES
 
+--- Campos que puede actualizar un snapshot de props de un cliente que NO es dueño ni tiene llave
+--- (dueño de red cercano al despawn): solo estado/daños, nunca estética ni mods.
+Security.PropSnapshotFields = {
+    bodyHealth = true, engineHealth = true, tankHealth = true, dirtLevel = true, fuelLevel = true,
+    oilLevel = true, windows = true, doors = true, tyres = true,
+}
+
+--- Kilometraje plausible.
+--- * newKm < oldKm, no numérico o NaN -> oldKm (clamped = true si newKm venía y era inválido/menor).
+--- * permitido = max(0, elapsedSec) * Config.MaxSpeedKmh (400) / 3600 + Config.MileageMarginKm (0.5),
+---   con tope Config.MaxMileageDeltaKm (50). Si se supera -> oldKm + permitido, LogReject/debug.
+---@param plate string|nil  solo para el log
+---@param oldKm number
+---@param newKm number
+---@param elapsedSec number
+---@return number km, boolean clamped
+function Security.ClampMileage(plate, oldKm, newKm, elapsedSec)
+    local function finite(v) return type(v) == 'number' and v == v and v ~= math.huge and v ~= -math.huge end
+    oldKm = tonumber(oldKm); if not finite(oldKm) or oldKm < 0 then oldKm = 0.0 end
+    newKm = tonumber(newKm)
+    if not finite(newKm) then return oldKm, true end
+    if newKm < oldKm then return oldKm, true end
+    local el = tonumber(elapsedSec); if not finite(el) or el < 0 then el = 0 end
+    local C = type(Config) == 'table' and Config or {}
+    local allowed = el * (tonumber(C.MaxSpeedKmh) or 400) / 3600 + (tonumber(C.MileageMarginKm) or 0.5)
+    local cap = tonumber(C.MaxMileageDeltaKm) or 50
+    if allowed > cap then allowed = cap end
+    if newKm - oldKm > allowed then
+        local msg = ('mileage +%.2f km en %ds (permitido %.2f) plate=%s'):format(newKm - oldKm, el, allowed, tostring(plate))
+        if Security.Config.debug then print(('[%s][SECURITY] %s'):format(Security.Config.resourceName, msg)) end
+        return oldKm + allowed, true
+    end
+    return newKm, false
+end
+
 local function depthOk(t, d)
     if d > Security.Props.maxDepth then return false end
     for _, v in pairs(t) do
@@ -407,12 +442,14 @@ end
 --- * model: debe coincidir con dbRow.model (hash) y, si se pasa entity, con GetEntityModel(entity). Si no -> rechazo.
 --- * plate: se sustituye SIEMPRE por la del servidor (dbRow.plate).
 --- * mileage (si viene): nunca por debajo del valor de BD -> se conserva el de BD (no se rechaza).
+---   Con elapsedSec (s desde la última actualización de km) se aplica además Security.ClampMileage.
 --- * Profundidad > maxDepth o JSON > maxBytes -> rechazo.
 ---@param props table
 ---@param dbRow {plate: string, model: string|integer, mileage: number|nil}
 ---@param entity integer|nil
+---@param elapsedSec number|nil
 ---@return table|nil clean, string|nil err
-function Security.SanitizeProps(props, dbRow, entity)
+function Security.SanitizeProps(props, dbRow, entity, elapsedSec)
     if type(props) ~= 'table' then return nil, 'props_not_table' end
     if type(dbRow) ~= 'table' or not dbRow.plate or dbRow.model == nil then return nil, 'no_db_row' end
     if not depthOk(props, 1) then return nil, 'props_too_deep' end
@@ -438,7 +475,11 @@ function Security.SanitizeProps(props, dbRow, entity)
     if props.mileage ~= nil then
         local old = tonumber(dbRow.mileage) or 0
         local new = tonumber(props.mileage)
-        clean.mileage = (new and new == new and new >= old and new < 1e9) and new or old
+        if elapsedSec ~= nil then
+            clean.mileage = Security.ClampMileage(dbRow.plate, old, new, elapsedSec)
+        else
+            clean.mileage = (new and new == new and new >= old and new < 1e9) and new or old
+        end
     end
     local okE, encoded = pcall(json.encode, clean)
     if not okE or type(encoded) ~= 'string' then return nil, 'props_encode' end

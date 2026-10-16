@@ -114,6 +114,13 @@ Siempre en servidor vía `Bridge.GetJob(src)` → `{ name, grade, onDuty }`. Usa
 - **Kilometraje**: si viene `mileage` menor que el de BD, **se conserva el de BD** (no se rechaza, para no bloquear el guardado por desincronización).
 - Límites: profundidad máx. 3, máx. 64 elementos por tabla anidada, JSON final ≤ **16 KB** (`Security.Props.maxBytes`). Superarlos → rechazo (`props_too_deep` / `props_too_large`).
 - `Security.ClampHealth('engine'|'body'|'tank', v)` para cualquier salud que se escriba en BD.
+- Firma fija: `Security.SanitizeProps(props, dbRow, entity, elapsedSec)`. Con `elapsedSec` (segundos desde la última actualización de km de esa matrícula) el `mileage` pasa por `Security.ClampMileage`.
+- **Kilometraje**: `Security.ClampMileage(plate, oldKm, newKm, elapsedSec) -> km, clamped`.
+  - Si `newKm` es menor que `oldKm`, no es numérico o es NaN → devuelve `oldKm`.
+  - Delta permitido = `max(0, elapsedSec) * Config.MaxSpeedKmh (400) / 3600 + Config.MileageMarginKm (0.5)`, con tope `Config.MaxMileageDeltaKm` (50).
+  - Si el delta se supera, devuelve `oldKm + permitido` y `clamped = true` (registrado si `debug`).
+- **Snapshots de props de terceros** (el dueño de red cerca de un coche aparcado): solo se aceptan los campos de `Security.PropSnapshotFields` (daños, suciedad, combustible, ventanas, puertas, ruedas). Mods, colores, extras y neones se mantienen de la BD salvo que quien responde sea el dueño o tenga llave.
+- **Tokens de petición a clientes**: aleatorios, de un solo uso, con TTL corto, enviados solo al destinatario con `TriggerClientEvent` (**nunca** en una state bag de entidad, que se replica a todos los clientes) y comprobados contra `NetworkGetEntityOwner` al recibir la respuesta.
 
 Revisión de fase 1 con hallazgos para backend: `docs/security-review-phase1.md`.
 
