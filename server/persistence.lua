@@ -12,6 +12,16 @@ local function saveEntityCoords(veh, plate)
         { json.encode({ x = c.x, y = c.y, z = c.z }), h, plate, VS.OUT })
 end
 
+--- R5-L1: every entity deleted during restart recovery is logged (never the server mark or the secret).
+local function deleteLogged(veh, plate, reason)
+    local okC, c = pcall(GetEntityCoords, veh)
+    local netId = NetworkGetNetworkIdFromEntity(veh)
+    print(('^3[mdp_garages] restart: deleted entity plate=%s model=%s netId=%s coords=%s reason=%s^0'):format(
+        tostring(plate), tostring(GetEntityModel(veh)), tostring(netId),
+        okC and c and ('%.1f,%.1f,%.1f'):format(c.x, c.y, c.z) or '?', reason))
+    DeleteEntity(veh)
+end
+
 --- Iterate live server vehicles that belong to this resource.
 local function forEachOwnEntity(fn)
     for _, veh in ipairs(GetAllVehicles()) do
@@ -153,7 +163,7 @@ local function onStart()
             if #marked == 1 then
                 ent = marked[1]
                 for _, c in ipairs(clones) do
-                    if Utils.IsVehicleEmpty(c) then DeleteEntity(c)
+                    if Utils.IsVehicleEmpty(c) then deleteLogged(c, plate, 'unmarked clone')
                     else print(('^3[mdp_garages] restart: occupied unmarked clone of %s ignored^0'):format(plate)) end
                 end
                 print(('^3[mdp_garages] restart: %s had %d matches; adopted the server-marked one, %d unmarked clone(s) handled^0'):format(plate, matches, #clones))
@@ -179,7 +189,7 @@ local function onStart()
             if not can then
                 if Utils.IsVehicleEmpty(ent) then
                     print(('^3[mdp_garages] restart: entity for %s not adoptable (%s), deleted^0'):format(plate, tostring(why)))
-                    DeleteEntity(ent)
+                    deleteLogged(ent, plate, 'not adoptable: ' .. tostring(why))
                 else
                     print(('^3[mdp_garages] restart: entity for %s not adoptable (%s) and occupied, ignored; row kept OUT^0'):format(plate, tostring(why)))
                     dupPlates[plate] = true -- never treated as orphan
@@ -199,7 +209,7 @@ local function onStart()
                 if mode == 'garage' and Utils.IsVehicleEmpty(ent) then
                     local n = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, garage_id = ?, engine = ?, body = ?, coords = NULL WHERE plate = ? AND state = ?',
                         { VS.GARAGED, Config.DefaultGarage, MDP.Props.Health('engine', GetVehicleEngineHealth(ent)), MDP.Props.Health('body', GetVehicleBodyHealth(ent)), plate, VS.OUT })
-                    if n == 1 then Security.UntrackSpawn(plate); DeleteEntity(ent); wanted[plate] = nil; garaged = garaged + 1 end
+                    if n == 1 then Security.UntrackSpawn(plate); deleteLogged(ent, plate, 'OnRestartOutVehicles=garage'); wanted[plate] = nil; garaged = garaged + 1 end
                 elseif Utils.IsVehicleEmpty(ent) and MDP.Props.ValidCoords(c) then
                     local n = MySQL.update.await([[UPDATE mdp_vehicles SET state = ?, coords = ?, heading = ?, parked_at = CURRENT_TIMESTAMP
                         WHERE plate = ? AND state = ?]], { VS.PARKED_WORLD, json.encode({ x = c.x, y = c.y, z = c.z }), h, plate, VS.OUT })
@@ -219,7 +229,7 @@ local function onStart()
     end
     local orphans = 0
     forEachOwnEntity(function(veh, plate)
-        if not wanted[plate] and not dupPlates[plate] and Utils.IsVehicleEmpty(veh) then DeleteEntity(veh); orphans = orphans + 1 end
+        if not wanted[plate] and not dupPlates[plate] and Utils.IsVehicleEmpty(veh) then deleteLogged(veh, plate, 'orphan (row not OUT/PARKED)'); orphans = orphans + 1 end
     end)
     print(('[mdp_garages] restart recovery: %d entities adopted, %d OUT -> parked_world, %d OUT -> %s, %d orphan entities removed')
         :format(adopted, parked, garaged, Config.DefaultGarage, orphans))

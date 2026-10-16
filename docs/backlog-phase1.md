@@ -31,6 +31,7 @@
 | P1R3-L1 (Baja) | Pendiente | Coche OUT sin marca y vacío borrado al arrancar → GARAGED con props de la BD (se pierde tuning de calle). |
 | P1R3-L2 (Baja) | Aceptado | Dueño de red puede escribir `mdp_srv` con strict mode desactivado (DoS de su propio coche); mitigado con `sv_stateBagStrictMode`. |
 | P1-OWN-M1 / R3-M1 hueco | Pendiente | Coche sin marca (o clones sin ninguno marcado) que queda OUT tras reiniciar: el dueño no puede guardarlo sin debilitar las reglas (`vehicle_mismatch`) fuera de la ventana de adopción; salida: `/mdp_regularize` o reinicio con el coche vacío. Falta una re-adopción segura diseñada con Security. |
+| R5 (reinicio) | Pendiente | Al reiniciar, no borrar nunca entidades creadas o poseídas por otros recursos (hoy se borran clones sin marca vacíos con nuestra matrícula y modelo); distinguir origen antes de borrar. |
 
 ## Desde QA fase 1 backend (16/10/2026, HEAD ac77923) — ver docs/qa-review-phase1-backend.md
 
