@@ -359,21 +359,24 @@ Mapeo de estados: qb/qbx `player_vehicles.state`: OUT/PARKED_WORLD → 0, GARAGE
 - si `newState == GARAGED (1)`, llama a `Bridge.Keys.RemoveKeys(src, plate)` (las llaves **temporales** del recurso externo);
 - si `PARKED_WORLD (2)`, se conservan;
 - nunca toca `mdp_vehicle_keys` (las llaves compartidas de la fase 3);
-- devuelve `true` si se quitaron las llaves.
+- devuelve `true` si se quitaron las llaves;
+- **solo quita las llaves del jugador que guarda el vehículo**, no las de otros ocupantes ni las de otros titulares temporales (confirmado por el Senior).
 
 ### Aplicación de props dirigida por el servidor
 | Elemento | Nombre | Dirección |
 |---|---|---|
 | Statebag de entidad | `mdp:props` (JSON o la tabla de Backend `{props, engine, body, fuel, fuelOnClient, mileage}`) | servidor → todos |
-| Ack | `mdp_garages:server:propsApplied` (netId) | dueño → servidor (net) |
+| Ack | `mdp_garages:server:propsApplied(netId, ok, reason?)`: `ok = true` aplicado; `ok = false` + `reason` ∈ {`model_mismatch`, `invalid_props`} = fallo determinista | dueño → servidor (net) |
 | Fallo final | `mdp_garages:client:propsApplyFailed` (netId) | servidor → jugador que hizo el spawn + dueño actual (net) |
 | Resultado local | `mdp_garages:client:propsApplied` (netId, ok) | `TriggerEvent` local en el cliente dueño. **No está en red**, no se registra como net event |
 
 Flujo:
 1. El servidor llama a `Bridge.Props.RequestApply(veh, payload, src?)`, que fija el statebag y arranca un temporizador de 5 s.
 2. El cliente que es (o pasa a ser en menos de 5 s) `NetworkGetEntityOwner` pide el control, aplica las props (`lib.setVehicleProperties`, salud del motor y la carrocería, `SetFuel` si `fuelOnClient`), envía el ack y emite el evento local con `ok`.
-3. El servidor comprueba el ack: rate limit 10 cada 5 s, netId entero y que el remitente sea el dueño actual (si no, `Security.LogReject`). Después limpia el statebag.
-4. Si no hay ack a los 5 s, el servidor reintenta una vez (pone el statebag a nil y lo vuelve a fijar, así que un dueño nuevo también ve el cambio).
+3. El servidor comprueba el ack: rate limit 10 cada 5 s, netId entero y que el remitente sea el dueño actual (si no, `Security.LogReject`). Después limpia el statebag y cancela el temporizador.
+   - **Fallo determinista:** antes de aplicar, el cliente comprueba que el payload se puede decodificar y que `props.model` coincide con `GetEntityModel` en 32 bits. Si no, envía de inmediato `ok = false, reason`, **sin reintento**. El servidor aplica las mismas comprobaciones; si `reason` no está en la whitelist, lo rechaza con `LogReject`. Si es válido, limpia el statebag, cancela el temporizador, lo registra en el log y envía `propsApplyFailed` al jugador del spawn y al dueño.
+   - El evento local `propsApplied(netId, false)` se emite **una sola vez**, al recibir `propsApplyFailed`. `propsApplied(netId, true)` se emite al aplicar con éxito.
+4. **Solo si no hay respuesta** (o hay un error transitorio de `lib.setVehicleProperties`, que no envía ack): a los 5 s el servidor reintenta una vez (pone el statebag a nil y lo vuelve a fijar, así que un dueño nuevo también ve el cambio).
 5. Si tampoco hay ack tras el reintento, registra el fallo en el log, limpia el statebag y envía `propsApplyFailed` al jugador del spawn y al dueño, que reemiten el evento local con `ok = false`.
 
 Este es el **único applier**: el de `client/props.lua` (Backend) se elimina. El odómetro ya no puede leer `mileage` del statebag, porque se limpia tras el ack; tiene que usar un statebag propio (p. ej. `mdp:mileage`).

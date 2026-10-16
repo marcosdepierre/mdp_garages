@@ -85,9 +85,9 @@ if IsDuplicityVersion() then
     local pending = {} -- netId -> { veh, payload, tries, src, token }
     local TIMEOUT = 5000
 
-    local function fail(netId, p)
+    local function fail(netId, p, silent)
         pending[netId] = nil
-        print(('^1[mdp_garages][props] apply not acknowledged for netId %d after retry^0'):format(netId))
+        if not silent then print(('^1[mdp_garages][props] apply not acknowledged for netId %d after retry^0'):format(netId)) end
         local targets = {}
         if p.src then targets[p.src] = true end
         if DoesEntityExist(p.veh) then
@@ -125,7 +125,11 @@ if IsDuplicityVersion() then
         return true
     end
 
-    RegisterNetEvent(ACK, function(netId)
+    local NACK_REASONS = { model_mismatch = true, invalid_props = true } -- deterministic: no retry
+
+    --- Ack from the owning client: (netId, ok, reason?). ok ~= false = applied; ok == false + whitelisted reason
+    --- = deterministic failure -> clear bag, cancel timer (pending removed), log, notify spawner + owner.
+    RegisterNetEvent(ACK, function(netId, ok, reason)
         local src = source
         if Security and Security.RateLimit and not Security.RateLimit(src, 'ev:propsApplied', 10, 5000) then return end
         netId = math.tointeger(tonumber(netId))
@@ -135,7 +139,15 @@ if IsDuplicityVersion() then
             if Security and Security.LogReject then Security.LogReject(src, ACK, 'not_owner') end
             return
         end
-        pending[netId] = nil
+        if ok == false then
+            if type(reason) ~= 'string' or not NACK_REASONS[reason] then
+                if Security and Security.LogReject then Security.LogReject(src, ACK, 'bad_nack_reason') end
+                return
+            end
+            print(('^1[mdp_garages][props] apply failed for netId %d (owner %d): %s^0'):format(netId, src, reason))
+            return fail(netId, p, true) -- clears bag, removes pending (timer becomes a no-op), notifies
+        end
+        pending[netId] = nil -- cancels timer (token check)
         Entity(p.veh).state:set(BAG, nil, true) -- clear: applied once
     end)
     return
@@ -187,6 +199,21 @@ local function decode(v)
     return type(v) == 'table' and v or nil
 end
 
+local function u32(h) h = math.tointeger(tonumber(h)); return h and (h & 0xFFFFFFFF) or nil end
+
+--- Deterministic checks before applying. Returns nil or a whitelisted reason ('model_mismatch'|'invalid_props').
+local function precheck(veh, v)
+    local props = v.props ~= nil and v.props or (v.model ~= nil and v or nil)
+    if type(props) == 'string' then local ok, d = pcall(json.decode, props); props = ok and d or false end
+    if props == false or (props ~= nil and type(props) ~= 'table') then return 'invalid_props' end
+    if props and props.model ~= nil then
+        local m = props.model
+        if type(m) == 'string' then m = joaat(m) end
+        if u32(m) == nil or u32(m) ~= u32(GetEntityModel(veh)) then return 'model_mismatch' end
+    end
+    return nil
+end
+
 local function applyPayload(veh, v)
     local props = v.props ~= nil and v.props or (v.model ~= nil and v or nil) -- bare props table/json also accepted
     local ok = true
@@ -201,7 +228,7 @@ end
 
 AddStateBagChangeHandler(BAG, nil, function(bagName, _, value)
     if value == nil or applying[bagName] then return end
-    local v = decode(value); if not v then return end
+    local v = decode(value) -- nil -> invalid payload (reported as invalid_props once we own the entity)
     applying[bagName] = true
     CreateThread(function()
         local deadline, veh = GetGameTimer() + 5000, 0
@@ -215,12 +242,18 @@ AddStateBagChangeHandler(BAG, nil, function(bagName, _, value)
         end
         applying[bagName] = nil
         if veh == 0 or not DoesEntityExist(veh) or NetworkGetEntityOwner(veh) ~= PlayerId() then return end -- not ours: new owner handles retry
+        local netId = NetworkGetNetworkIdFromEntity(veh)
+        local reason = (not v) and 'invalid_props' or precheck(veh, v)
+        if reason then -- deterministic failure: immediate negative ack, no retry (server sends FAIL -> LOCAL_DONE false)
+            print('^3[mdp_garages][props] not applied: ' .. reason .. '^0')
+            TriggerServerEvent(ACK, netId, false, reason)
+            return
+        end
         local okCall, res = pcall(applyPayload, veh, v)
         local ok = okCall and res ~= false
         if not okCall then print('^3[mdp_garages][props] apply failed: ' .. tostring(res) .. '^0') end
-        local netId = NetworkGetNetworkIdFromEntity(veh)
-        if ok then TriggerServerEvent(ACK, netId) end -- failure: no ack -> server retries once, then FAIL
-        TriggerEvent(LOCAL_DONE, netId, ok)
+        if ok then TriggerServerEvent(ACK, netId, true) end -- transient failure: no ack -> server retries once, then FAIL
+        if ok then TriggerEvent(LOCAL_DONE, netId, true) end
     end)
 end)
 
