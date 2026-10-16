@@ -28,3 +28,6 @@ Recomendación: actualiza en un reinicio programado con pocos jugadores conectad
 - `sv_entityLockdown relaxed` (o `strict` si no rompe otros recursos).
 - `sv_filterRequestControl 2` (o `1`).
 - `sv_stateBagStrictMode true` solo si ningún otro recurso escribe statebags desde el cliente.
+
+### `ox:callbackTimeout` (opcional)
+`setr ox:callbackTimeout <ms>` es un convar **global** de ox_lib que afecta a todos los recursos, así que mdp_garages **no lo exige**. Es opcional: súbelo solo si tu servidor tiene mucha latencia y ves timeouts en los callbacks. No hace falta por seguridad, porque el servidor ya protege contra el doble envío (lock por matrícula, UPDATE condicional por estado y rate limit por jugador), y el cliente ignora las respuestas que llegan tarde (L1 de Frontend).
