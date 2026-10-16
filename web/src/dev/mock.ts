@@ -36,7 +36,8 @@ export async function mockNui(event: string, data: unknown): Promise<NuiResponse
       const v = vehicles.find((x) => x.plate === d.plate);
       if (!v) return { ok: false, error: 'not_owner' };
       if (v.state === VehicleState.Retired) return { ok: false, error: 'retired' };
-      if (v.state !== VehicleState.Garaged) return { ok: false, error: 'already_out' };
+      if (v.state === VehicleState.Impounded) return { ok: false, error: 'impounded' };
+      if (v.state !== VehicleState.Garaged && v.state !== VehicleState.ParkedWorld) return { ok: false, error: 'already_out' };
       return { ok: true, data: { netId: 1000 + Math.floor(Math.random() * 9000) } };
     }
     default: return { ok: false, error: 'invalid_request' };

@@ -17,21 +17,22 @@ web/
     types/index.ts      NUI contract (docs/architecture.md), NUI_ERROR_CODES, PLATE_RE / isValidPlate (1-8)
     nui/                env.ts, fetchNui.ts (10 s timeout), useNuiMessages.ts
     router.tsx          useRouter(): navigate/back/reset (state-based)
-    views/              ListView, DetailView, VehicleTable, Empty (placeholder-level, UUI components only)
+    views/              ListView, DetailView, VehicleCard, Empty, stats.ts (placeholder-level; layout divs + UUI components)
     dev/                mock.ts + DevToolbar.tsx — DEV ONLY (import.meta.env.DEV), absent from dist
-    components/         Untitled UI (CLI): modal, table, empty-state, progress-indicators, badges, buttons,
-                        input, tabs (+ deps: featured-icon, tooltip, checkbox, dropdown, avatar, illustrations)
+    components/         Untitled UI (CLI, FREE): modals, buttons, badges, progress-indicators, featured-icon, dot-icon.
+                        Table/EmptyState removed (QC N3: they pulled ~200 KB of react-aria table + file-icons).
     styles/             Untitled UI theme (globals.css → typography.css → theme.css → ../../tokens.css)
 ```
 
 ## Develop
 ```bash
 cd web
-npm install
+npm ci             # exact versions from package-lock.json (package.json is pinned, .npmrc save-exact=true)
 npm run dev        # http://localhost:5173 — dev: auto-opens with mocks + dev toolbar
 npm run typecheck  # tsc -b
 npm run build      # tsc + vite build → web/dist (commit it; FiveM serves it as-is)
 ```
+**Reproducible build:** `npm ci && npm run build` from a clean checkout gives a byte-identical `dist/` (Tailwind scans only `src/` + `index.html` via `source()`/`@source`). Always rebuild with `npm ci` before committing `dist/`.
 Production build outside FiveM shows nothing and fetchNui returns `{ok:false,error:'server_error'}` (no mocks shipped).
 Add components: `npx untitledui@latest add <name> -y` (FREE only; Alerts, Section headers are PRO).
 
@@ -39,6 +40,8 @@ Add components: `npx untitledui@latest add <name> -y` (FREE only; Alerts, Sectio
 - `fetchNui<E>(event, data): Promise<{ ok, error?, data? }>` — POST `https://${GetParentResourceName() ?? 'mdp_garages'}/${event}`, 10 s timeout → `error:'timeout'`.
 - Lua → NUI: `open {view, data:{garage, vehicles}, locale?, plate?}`, `update {data (merged), view?, plate?}` (ignored before the first `open`), `close` (hide).
 - ESC: `preventDefault` + `fetchNui('close')` only; the panel hides when that callback answers (or times out), or on a Lua `close` message.
+- Take out enabled for state 1 (garaged) and 2 (parked_world); 3 impounded = display only; 4 retired = 'Retired' section, no button; disabled if `open` had no `garage`.
+- Error codes: `NUI_ERROR_CODES` = docs/architecture.md "Error codes (single source of truth)"; unknown codes → `rejected`.
 - `takeOut` ok → hide (Lua `UI.Close()` also sends `close`); error → localized `err_<code>` Badge.
 - No `innerHTML` / `dangerouslySetInnerHTML` in our source.
 

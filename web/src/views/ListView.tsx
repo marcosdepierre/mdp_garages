@@ -1,13 +1,12 @@
-// PLACEHOLDER-level list (phase 0). Untitled UI: TableCard, Table, Badge, Button, Empty state.
-import { TableCard } from '@/components/application/table/table';
+// Placeholder-level list (phase 0): vehicle cards + separate "Retired" section.
 import { useT } from '@/i18n';
 import type { Router } from '@/router';
 import type { OpenData } from '@/types';
 import { VehicleState } from '@/types';
 import { Empty } from './Empty';
-import { VehicleTable } from './VehicleTable';
+import { VehicleCard } from './VehicleCard';
 
-export function ListView({ data, router }: { data: OpenData; router: Router }) {
+export function ListView({ data, router, selected }: { data: OpenData; router: Router; selected?: string }) {
   const t = useT();
   const vehicles = Array.isArray(data.vehicles) ? data.vehicles : [];
   const active = vehicles.filter((v) => Number(v.state) !== VehicleState.Retired);
@@ -16,19 +15,18 @@ export function ListView({ data, router }: { data: OpenData; router: Router }) {
   if (vehicles.length === 0) return <Empty title={t('empty')} />;
 
   return (
-    <div className="flex flex-col gap-6">
-      <TableCard.Root size="sm">
-        <TableCard.Header title={t('vehicles')} badge={String(active.length)} />
-        {active.length > 0
-          ? <VehicleTable label={t('vehicles')} vehicles={active} onDetails={(v) => router.navigate('detail', { plate: v.plate })} />
-          : <Empty title={t('empty')} />}
-      </TableCard.Root>
+    <div className="flex flex-col gap-2">
+      {active.map((v) => (
+        <VehicleCard key={v.plate} v={v} selected={v.plate === selected}
+          onSelect={() => (router.route.name === 'detail' ? router.reset('detail', { plate: v.plate }) : router.navigate('detail', { plate: v.plate }))} />
+      ))}
       {retired.length > 0 && (
-        // Retired (state 4): no take-out/details; recovered from the phone app (phase 7).
-        <TableCard.Root size="sm">
-          <TableCard.Header title={t('retired_section')} badge={String(retired.length)} description={t('retired_hint')} />
-          <VehicleTable label={t('retired_section')} vehicles={retired} />
-        </TableCard.Root>
+        // Retired (state 4): not selectable, no take-out; recovered from the phone app (phase 7).
+        <section className="mt-4 flex flex-col gap-2" aria-label={t('retired_section')}>
+          <h2 className="font-display text-lg font-bold uppercase text-secondary">{t('retired_section')}</h2>
+          <p className="text-sm text-tertiary">{t('retired_hint')}</p>
+          {retired.map((v) => <VehicleCard key={v.plate} v={v} />)}
+        </section>
       )}
     </div>
   );

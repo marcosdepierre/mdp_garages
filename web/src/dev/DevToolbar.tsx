@@ -5,7 +5,7 @@ import { garages, mockOpenMessage, vehicles } from './mock';
 
 export default function DevToolbar() {
   return (
-    <div className="fixed bottom-2 left-2 z-[100] flex items-center gap-2 rounded-lg bg-primary/90 p-2 ring-1 ring-secondary">
+    <div data-react-aria-top-layer="true" className="fixed bottom-2 left-2 z-[100] flex items-center gap-2 rounded-lg bg-primary/90 p-2 ring-1 ring-secondary">
       {garages.map((g) => (
         <Button key={g.id} size="xs" color="secondary" onClick={() => emitNui(mockOpenMessage(g))}>open {g.kind}</Button>
       ))}

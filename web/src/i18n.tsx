@@ -1,5 +1,6 @@
 import { createContext, useContext } from 'react';
 import type { LocaleTable, NuiErrorCode } from '@/types';
+import { normalizeError } from '@/types';
 
 /** English fallback — generated verbatim from locales/en.lua `ui` table (keep in sync). */
 export const EN: LocaleTable = {
@@ -64,11 +65,15 @@ export const EN: LocaleTable = {
   err_invalid_source: "Player not loaded",
   err_already_paid: "This fine is already paid",
   err_invalid_amount: "Invalid amount",
+  err_impounded: "This vehicle is impounded, release it at the impound lot",
+  err_fine_not_found: "Fine not found or already paid",
+  err_in_use: "Someone is using this vehicle",
+  err_vehicle_moved: "This vehicle is no longer where it was parked",
 };
 
 export type T = (key: string) => string;
 export const makeT = (locale?: LocaleTable): T => (key) => locale?.[key] ?? EN[key] ?? key;
-export const errorKey = (code?: NuiErrorCode | string) => (code ? `err_${code}` : 'error');
+export const errorKey = (code?: NuiErrorCode | string) => (code ? `err_${normalizeError(code)}` : 'error');
 
 export const I18nContext = createContext<T>(makeT());
 export const useT = () => useContext(I18nContext);

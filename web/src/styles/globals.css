@@ -1,10 +1,10 @@
-@import "tailwindcss";
+@import "tailwindcss" source("../"); /* N9: scan only web/src (+ index.html via @source) for reproducible CSS */
+@source "../../index.html";
 /* Order per docs/design-system.md */
 @import "./typography.css";
 @import "./theme.css";
 @import "../../tokens.css"; /* Designer overrides (web/tokens.css) — ALWAYS LAST */
 
-@plugin "@tailwindcss/typography";
 @plugin "tailwindcss-react-aria-components";
 @plugin "tailwindcss-animate";
 
