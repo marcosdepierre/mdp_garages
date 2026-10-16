@@ -255,3 +255,43 @@ P1-OWN-M1 atascado sin re-adopción · M2 `/mdp_regularize` saca de incautado/re
 
 ## Veredicto (HEAD revisado `7ad284c`)
 **NO se puede cerrar: 2 Altas** (P1-OWN-H1: vendido mientras está fuera se puede seguir guardando; P1-OWN-H2: `SpawnOwnedVehicle` duplica cuando hay una entidad sin trackear). El núcleo owner-only (NPC, coche ajeno, llaves, matrícula falsa, modelo, estados, códigos de error y NUI) está bien.
+
+---
+
+# Propiedad R2 (8a4e3cf, 677f577)
+
+- Fecha: 16/10/2026, 23:20 (UTC+1). Árbol limpio de `677f577` (`git archive`), que incluye `8a4e3cf`, `926d58b` y `7ad284c`. Líneas de `677f577`.
+- `luac54 -p`: OK en todos los .lua. `/tmp/qa/p1/test.lua`: **35/35**. `own_r2.lua` (own_t7 + 11 casos R2): **42/43** (FAIL = R2-M1). `imp_r2.lua`: **9/9**.
+
+## Contrato CanStoreOwnVehicle ↔ lockedOwnVehicle
+- `lockedOwnVehicle(…, isStore)` ahora pasa `states={[0]=true}`, `allowDriver`/`requireDriver = isStore`, `requireEmpty = not isStore`, `allowKeys`, `row`. Son los mismos nombres que `Security.CanStoreOwnVehicle` (security.lua:656-702) y que el gemelo local ✓.
+- `STORE_ERR` mapea `not_driver` → `not_in_vehicle`, `occupied`, `invalid_source/entity` ✓.
+- **L1 cerrado:** probé un pasajero que entra durante el lock al guardar → `occupied`, y alguien que entra durante el lock al aparcar → `occupied`, sin escribir nada.
+- Pequeño detalle de 8a4e3cf: el dueño se compara con `row.owner == ident`. Solo se consulta `IsOwner` si `row.owner` es nil. Correcto.
+
+## H1 (vendido mientras está fuera): **CERRADO**
+- Transferencia inmediata (`ApplyTransfer`: UPDATE condicionado al dueño anterior, `state <> 5`) en el sync, en `AddVehicle` y dentro del lock de store/park (`FrameworkOwner` ≠ `row.owner` → `not_owner` + transferencia). Harness: guardar o aparcar tras una venta en el framework → `not_owner` y la fila pasa al comprador ✓. Una fila solo de mdp (sin fila en el framework) → guarda normalmente ✓.
+- Casos límite:
+  - **Venta durante el guardado (carrera):** si la venta llega después de la comprobación y dentro del lock, el vendedor guarda (GARAGED) y el siguiente sync pasa la fila al comprador. Ventana de ms, resultado final correcto → aceptado.
+  - **Comprador offline:** la fila cambia de dueño; la entidad sigue trackeada con `src` del vendedor → R2-M2 (la política de desconexión del vendedor se aplica al coche del comprador). Al conectarse, `claimSpawns` se lo da al comprador ✓.
+  - **Vendedor conduciendo:** la entidad **no se borra** y no se expulsa a los ocupantes. Se borran las llaves de la tabla y se llama a `Bridge.Keys.RemoveKeys(seller)` en vivo (si está online). El vendedor puede seguir conduciendo, pero no guardarlo ni aparcarlo (`not_owner`). Documentarlo (R2-M2).
+  - **Venta a uno mismo:** `e.owner == r.owner` → no se hace nada; `AddVehicle` no entra en la rama de transferencia ✓.
+  - **Estado 3 con multas:** se transfiere; las multas siguen siendo del vendedor (`mdp_fines.owner`) → R2-L2, decisión de Security.
+  - **Formatos ESX/QB:** `FrameworkOwner` devuelve `owned_vehicles.owner` (ESX `char1:…`/`license:…`) o `player_vehicles.citizenid` (QB/Qbox), que es la misma columna que se importó a `mdp_vehicles.owner` → comparación coherente. Matrícula con `UPPER(TRIM())`: se cubre el relleno de ESX, pero no los espacios internos dobles (R2-L1) ni el índice (R2-M3).
+
+## H2 (duplicado en SpawnOwnedVehicle/takeOut): **CERRADO**
+- Escaneo del pool (`liveEntityConflict`, garages.lua:88) dentro del lock, antes de spawnear en `takeOut` (:130, excluye el coche aparcado trackeado) y en `SpawnOwnedVehicle` (:608). Harness: entidad sin marca viva → `vehicle_mismatch`, marcada sin trackear → `already_out`, 0 spawns ✓. Los dos exports pasan por `Config.TrustedResources`: con un recurso no listado o el propio recurso → `untrusted_resource` + mensaje con instrucciones ✓.
+- Casos límite:
+  - **Coste:** solo bajo demanda (takeOut limitado a 1/s, export a 3/10 s), O(n vehículos) por llamada, nunca por tick ✓. Sigue P1-M3 en el streamer.
+  - **Normalización:** las dos matrículas pasan por `NormalizePlate` (trim, espacios colapsados, mayúsculas): `"tr 004 "` vs `"TR  004"` coinciden ✓.
+  - **Routing buckets / culling:** `GetAllVehicles` ve todas las entidades de red de todos los buckets, sin importar el culling. Una entidad en otro bucket bloquea (correcto contra duplicados). Las entidades solo de cliente (no de red) no se ven, pero tampoco se pueden guardar.
+  - **Falso `already_out`/`vehicle_mismatch`:** **sí** → R2-M1. Cualquier coche con la matrícula de la víctima (otro modelo, sin marca) bloquea que la víctima saque su coche del garaje. Harness FAIL.
+- **Adaptadores:** ningún archivo de mdp_garages llama a los exports → nada interno se rompe. Los concesionarios externos dejan de funcionar hasta añadirlos a `TrustedResources` (R2-L4).
+
+## Otros
+- **M2 cerrado:** `/mdp_regularize` rechaza los estados 3/4 y las multas pendientes (por `plate`; ver R2-L2). Harness ✓.
+- **M5 cerrado:** con una columna DATETIME/TIMESTAMP, una fecha NULL o futura (más de 5 min de desfase) ya no es adoptable ✓. **Sin columna de fecha (esquemas estándar) sigue siendo adoptable dentro de los 30 min de mdp → pendiente de Security.** Si la consulta con la columna de fecha falla, se reintenta sin ella y sin adopciones ✓.
+- **Siguen abiertos:** M1 (atascado sin re-adopción), M3 (`RegisterExternalVehicle` sigue sin `ownerSrc`), M4 (tipo 7 desde cliente), L2, L4-L9.
+
+## Veredicto R2 (HEAD `677f577`)
+**H1 y H2 CERRADOS. 0 Crítica/Alta.** Quedan Medias nuevas: R2-M1 (bloqueo de takeOut poniendo una matrícula falsa, DoS), R2-M2 (transferencia con comprador offline: política de desconexión) y R2-M3 (full scan en `FrameworkOwner`). Siguen M1/M3/M4. Pendiente de Security: adopción sin columna de fecha y multas al vender un coche incautado.
