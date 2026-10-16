@@ -249,3 +249,45 @@ Eventos y callbacks que dispara el cliente: `lib.callback` `mdp_garages:storeVeh
 ### Hallazgos del cliente
 - **F1 (Bajo) — `busy` puede quedarse en `true`** (`client/zones.lua`, `storeCurrent` y `/mdp_park`): si `readVehicle`, `GetLabelText` o `toast` lanzan un error antes de `busy = false`, el jugador ya no puede guardar ni aparcar hasta reconectar. Solo le afecta a él (no es un riesgo para el servidor). *Arreglo:* envolver el cuerpo en `pcall` y poner `busy = false` en un único punto final.
 - **F2 (Info) — Etiquetas de modelos addon en los toasts:** `GetLabelText` de un vehículo addon puede contener `<`, `>` o `~r~`. Se muestra como texto (sin riesgo XSS); como mucho son códigos de color sin interpretar. Sin acción.
+
+---
+
+# Re-revisión 3 (16/10/2026, 22:50 UTC+1)
+
+Commits revisados: `a8fda43` y `ec0c3b7` (backend, sobre HEAD), y `fecc05a` (F1, cliente).
+
+## Veredicto
+
+| # | Veredicto | Evidencia |
+|---|---|---|
+| **N1** | **CERRADO** | `server/props.lua` (`doSpawn`): `Security.MarkServerEntity(veh, row.plate)` justo después de confirmar `DoesEntityExist`, antes de la matrícula y de las state bags. `server/streamer.lua` (`spawnParked`): solo se adopta con `Security.CanAdopt(ent, plate, pos, ModelHash)`, con coords de BD; si no pasa y está vacía → `DeleteEntity` + log; si está ocupada → se ignora + log + backoff. `server/persistence.lua:114-137` (arranque): `CanAdopt` con las coords de la fila (`r.coords`); los rechazos se borran si están vacíos o se ignoran si están ocupados (marcados en `dupPlates`, nunca huérfanos), y todo queda en el log. No queda ningún uso de `NetworkGetFirstEntityOwner` ni de `adoptable`/`mdp_plate` como prueba de origen. |
+| **N10** | **CERRADO** | `server/persistence.lua:16-23` (`forEachOwnEntity`) exige `Security.IsServerEntity(veh, plate)` además de `mdp_plate`. Por tanto, `saveEntityCoords` al parar y el borrado de huérfanos al arrancar solo afectan a entidades marcadas por el servidor. |
+| N11 | Cerrado | `math.randomseed(...)` eliminado de `props.lua`. |
+| N2b | Cerrado | `mergeSnapshot` pone `base.model = Utils.ModelHash(row.model)` si las props de BD no lo traen. |
+| F1 | Cerrado | `client/zones.lua` (`guarded`): `xpcall`, liberación única de `busy`, timeout de seguridad de 15 s y un token por intento que invalida los resultados tardíos. |
+| Docs server.cfg | Correcto | `README.md`: `set mdp_garages_entity_secret`, `sv_entityLockdown`, `sv_filterRequestControl 2`. |
+
+**Fase 1: sin bloqueantes de seguridad abiertos.** Quedan los Bajos de abajo y L3 (backlog).
+
+## Excepción aprobada al arrancar (fila OUT, entidad del servidor ocupada o movida)
+
+Código: `server/persistence.lua:121-127` (`ec0c3b7`). Cada condición, comprobada contra el código:
+
+| Condición | ¿Se cumple? | Dónde |
+|---|---|---|
+| Estado de BD = OUT | Sí | `st == VS.OUT` |
+| `IsServerEntity` = true | Sí | Llamada explícita `Security.IsServerEntity(ent, plate)` (además, `why ∈ {occupied, moved}` implica que `CanAdopt` ya pasó la comprobación de origen) |
+| El modelo coincide | Sí | `GetEntityModel(ent) == Utils.ModelHash(r.model)` (y `CanAdopt` comprueba el modelo antes que occupied/moved) |
+| Solo occupied/moved | Sí | `why == 'occupied' or why == 'moved'`; `not_server_entity` y `model_mismatch` nunca entran |
+| Sin reasignar dueño/llave al conductor | Sí | `TrackSpawn(plate, netId, nil)` (l.142), sin `ClaimSpawn` ni `GiveKeys` en el arranque. Como el `src` queda en nil, `OnPlayerDropped` no aplica políticas por ese conductor. |
+| Log con el motivo | Sí | `restart: <plate> adopted despite <occupied|moved> (own server entity, state OUT)` |
+| Guardados de posición posteriores con L4 | Sí | `saveEntityCoords` (l.8-12) y la rama park del arranque (l.151) exigen `MDP.Props.ValidCoords`; el streamer y `applyPolicy` también validan. |
+
+**Veredicto: la excepción cumple exactamente las condiciones aprobadas.**
+
+## Nuevos hallazgos (todos Bajos / informativos)
+
+- **R3-1 (Bajo) — Comparación de hash con signo** (`persistence.lua:124`). `GetEntityModel(ent) == Utils.ModelHash(r.model)` depende de que ambos lados usen la misma convención de signo. Hoy coinciden (`ModelHash` normaliza a con signo, igual que `GetEntityModel` en el servidor). *Opcional:* comparar `& 0xFFFFFFFF`, como hace `Security.CanAdopt`.
+- **R3-2 (Info) — Entidades sin marca de versiones anteriores.** En el primer reinicio tras desplegar `a8fda43`, las entidades vivas creadas antes no tienen `mdp_srv`. Si están vacías se borran y la fila sigue el flujo normal (OUT → GARAGED, PARKED_WORLD → respawn por el streamer). Si están ocupadas se ignoran. No hay pérdida ni duplicado. Avisarlo en las notas de la versión.
+- **R3-3 (Info) — El streamer borra una entidad propia «movida».** Si una entidad del servidor sin trackear se movió más de `ParkedMoveTolerance` (por ejemplo, empujada), el streamer la borra y la vuelve a spawnear en las coords de BD. No hay duplicado; se pierde el desplazamiento. Es aceptable.
+- **R3-4 (Info) — Secreto sin convar.** Sin `mdp_garages_entity_secret`, el secreto queda en el KVP del recurso. Cualquiera con acceso a los archivos del servidor puede leerlo (el mismo nivel de confianza que la base de datos). La convar sigue siendo lo recomendado.
