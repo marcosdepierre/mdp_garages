@@ -21,7 +21,9 @@ Security = Security or {}
 local cfgSrc = (type(Config) == 'table' and type(Config.Security) == 'table') and Config.Security or {}
 
 Security.Config = {
-    debug             = cfgSrc.debug or false,
+    -- Sigue Config.Debug salvo que Config.Security.debug se fije explícitamente.
+    debug             = (cfgSrc.debug ~= nil) and (cfgSrc.debug == true)
+                        or (type(Config) == 'table' and Config.Debug == true),
     resourceName      = GetCurrentResourceName(),
     ownedTable        = cfgSrc.ownedTable or 'mdp_vehicles', -- Config.Security.ownedTable si existe
     plateColumn       = cfgSrc.plateColumn or 'plate',
@@ -31,6 +33,8 @@ Security.Config = {
     defaultRateLimit  = cfgSrc.defaultRateLimit or { max = 5, windowMs = 2000 },
     lockTimeoutMs     = cfgSrc.lockTimeoutMs or 10000,
     flagThreshold     = cfgSrc.flagThreshold or 20, -- rechazos antes de disparar OnSuspicious
+    despawnOnDropMs   = cfgSrc.despawnOnDropMs,       -- nil = no hacer nada con vehículos al desconectar
+    rateCarryMs       = cfgSrc.rateCarryMs or 30000,  -- cooldown por identificador al reconectar (0/false = off)
 }
 
 -- Whitelist de tablas/columnas permitidas para identificadores dinámicos en SQL.
@@ -71,7 +75,8 @@ end
 Security.V = {}
 local V = Security.V
 
---- Matrícula: trim + mayúsculas, 1-12 caracteres [A-Z0-9 ] (mdp_vehicles.plate VARCHAR(12)).
+--- Matrícula: regla única en Utils.IsValidPlate (longitud = Config.PlateMaxLength, por defecto 8).
+--- Aquí no hay longitudes fijas: todo se delega en Utils.
 --- Delegado en shared/utils.lua para que cliente y servidor usen la misma regla.
 function V.isPlate(v) return Utils.IsValidPlate(v) end
 
@@ -152,10 +157,22 @@ end
 local buckets = {} ---@type table<integer, table<string, number[]>>
 
 ---@return boolean allowed
+local carry = {} ---@type table<string, {at: integer, buckets: table}>
+
 function Security.RateLimit(src, key, max, windowMs)
     local now = GetGameTimer()
     local pb = buckets[src]
-    if not pb then pb = {}; buckets[src] = pb end
+    if not pb then
+        pb = {}
+        -- Reconexión: recuperar buckets guardados por identificador (si no expiraron)
+        local ident = Bridge and Bridge.GetIdentifier and Bridge.GetIdentifier(src)
+        local c = ident and carry[ident]
+        if c then
+            carry[ident] = nil
+            if (now - c.at) < (Security.Config.rateCarryMs or 0) then pb = c.buckets end
+        end
+        buckets[src] = pb
+    end
     local list = pb[key]
     if not list then list = {}; pb[key] = list end
     local cutoff, j = now - windowMs, 0
@@ -171,21 +188,48 @@ end
 ---------------------------------------------------------------------------
 -- Locks por matrícula (anti-duplicación / anti doble spawn)
 ---------------------------------------------------------------------------
-local plateLocks = {} ---@type table<string, {src: integer, at: integer}>
+local plateLocks = {} ---@type table<string, {src: integer, at: integer, token: string}>
+local lockSeq = 0
 
----@return boolean acquired
+local function newToken(src)
+    lockSeq = lockSeq + 1
+    return ('%d:%d:%d'):format(src or 0, GetGameTimer(), lockSeq)
+end
+
+--- Toma el lock de una matrícula (o clave, p.ej. 'fine:<id>').
+--- Un lock caducado (> lockTimeoutMs) se reemplaza con un token nuevo.
+---@param plate string
+---@param src integer|nil   0 = servidor
+---@return string|false token
 function Security.Lock(plate, src)
     plate = V.normalizePlate(plate)
     if not plate then return false end
     local now, l = GetGameTimer(), plateLocks[plate]
     if l and (now - l.at) < Security.Config.lockTimeoutMs then return false end
-    plateLocks[plate] = { src = src or 0, at = now }
-    return true
+    if l and Security.Config.debug then
+        print(('[%s][SECURITY] lock caducado de %s (src=%s) reemplazado'):format(
+            Security.Config.resourceName, plate, tostring(l.src)))
+    end
+    local token = newToken(src)
+    plateLocks[plate] = { src = src or 0, at = now, token = token }
+    return token
 end
 
-function Security.Unlock(plate)
+--- Libera el lock solo si el token coincide; si no, lo registra y devuelve false.
+---@param plate string
+---@param token string
+---@return boolean
+function Security.Unlock(plate, token)
     plate = V.normalizePlate(plate)
-    if plate then plateLocks[plate] = nil end
+    local l = plate and plateLocks[plate]
+    if not l then return false end
+    if token == nil or l.token ~= token then
+        print(('[%s][SECURITY] Unlock rechazado: token no coincide (clave=%s, dueño src=%s)'):format(
+            Security.Config.resourceName, tostring(plate), tostring(l.src)))
+        return false
+    end
+    plateLocks[plate] = nil
+    return true
 end
 
 function Security.IsLocked(plate)
@@ -195,10 +239,12 @@ function Security.IsLocked(plate)
 end
 
 --- Ejecuta fn con el lock tomado y lo libera siempre (incluso si fn falla).
+--- El token se gestiona internamente; si el lock caducó y otro lo tomó, no se libera el ajeno.
 function Security.WithLock(plate, src, fn, ...)
-    if not Security.Lock(plate, src) then return false, 'locked' end
+    local token = Security.Lock(plate, src)
+    if not token then return false, 'locked' end
     local res = table.pack(pcall(fn, ...))
-    Security.Unlock(plate)
+    Security.Unlock(plate, token)
     if not res[1] then error(res[2], 0) end
     return table.unpack(res, 2, res.n)
 end
@@ -232,6 +278,19 @@ function Security.GetSpawnedEntity(plate)
     if ent ~= 0 and DoesEntityExist(ent) then return ent, s.netId end
     spawned[plate] = nil
     return nil
+end
+
+--- Resuelve la matrícula de un vehículo en servidor a partir de su netId.
+---@param netId integer
+---@return string|nil plate, string|nil err
+function Security.PlateFromNetId(netId)
+    if math.type(netId) ~= 'integer' or netId <= 0 then return nil, 'bad_netid' end
+    local ent = NetworkGetEntityFromNetworkId(netId)
+    if not ent or ent == 0 or not DoesEntityExist(ent) then return nil, 'no_entity' end
+    if GetEntityType(ent) ~= 2 then return nil, 'not_vehicle' end
+    local plate = V.normalizePlate(GetVehicleNumberPlateText(ent))
+    if not V.isPlate(plate) then return nil, 'bad_plate' end
+    return plate, nil, ent
 end
 
 ---------------------------------------------------------------------------
@@ -324,7 +383,9 @@ local function packArgs(opts, ...)
 end
 Security.PackArgs = packArgs
 
+--- Orden: source → rate limit → schema → resolvePlate → job → distancia → propiedad (BD).
 local function runChecks(name, src, opts, data)
+    if type(data) == 'table' then data._plate = nil end -- nunca aceptar _plate del cliente
     src = tonumber(src)
     if not src or src <= 0 or GetPlayerName(src) == nil then return false, 'invalid_source' end
     local rl = opts.rateLimit or Security.Config.defaultRateLimit
@@ -333,17 +394,29 @@ local function runChecks(name, src, opts, data)
     end
     local ok, err = Security.ValidateSchema(data, opts.schema)
     if not ok then return false, err end
-    if opts.job and not Security.HasJob(src, opts.job) then return false, 'job_denied' end
-    if opts.requireOwnership then
-        if type(data) ~= 'table' or not V.isPlate(data.plate) then return false, 'no_plate' end
-        if not Security.IsOwner(src, data.plate) then return false, 'not_owner' end
+    -- opts.resolvePlate(src, data) -> plate|nil, err: la matrícula se obtiene en SERVIDOR
+    -- (p.ej. desde netId con Security.PlateFromNetId) y se guarda en data._plate.
+    if opts.resolvePlate then
+        if type(data) ~= 'table' then return false, 'payload_not_table' end
+        local okR, plate, rerr = pcall(opts.resolvePlate, src, data)
+        if not okR then return false, 'resolve_error' end
+        plate = plate and V.normalizePlate(plate)
+        if not plate or not V.isPlate(plate) then return false, 'plate_unresolved:' .. tostring(rerr or 'nil') end
+        data._plate = plate
     end
+    if opts.job and not Security.HasJob(src, opts.job) then return false, 'job_denied' end
     if opts.distance then
         -- getCoords(src, data) debe resolver coords DESDE CONFIG/servidor, nunca desde data.coords
         local c = opts.distance.getCoords(src, data)
         if not c or not Security.IsNear(src, c, opts.distance.max or 10.0) then
             return false, 'too_far'
         end
+    end
+    -- La propiedad (consulta a BD) va al final: es la comprobación más cara.
+    if opts.requireOwnership then
+        local plate = (type(data) == 'table') and (data._plate or data.plate) or nil
+        if not V.isPlate(plate) then return false, 'no_plate' end
+        if not Security.IsOwner(src, plate) then return false, 'not_owner' end
     end
     return true
 end
@@ -352,7 +425,7 @@ end
 -- Registro de eventos seguros
 ---------------------------------------------------------------------------
 ---@param name string
----@param opts table {args={'plate','garageId'}?, rateLimit={max,windowMs}|false, schema={campo=tipo|validador}, distance={getCoords=fn,max=n}, job={names,minGrade}, requireOwnership=bool}
+---@param opts table {args={'plate','garageId'}?, rateLimit={max,windowMs}|false, schema={campo=tipo|validador}, distance={getCoords=fn,max=n}, job={names,minGrade}, requireOwnership=bool, resolvePlate=fn(src,data)->plate|nil,err}
 ---@param handler fun(src: integer, data: table)
 function Security.RegisterSecureEvent(name, opts, handler)
     opts = opts or {}
@@ -403,15 +476,70 @@ end
 ---------------------------------------------------------------------------
 -- Limpieza
 ---------------------------------------------------------------------------
-AddEventHandler('playerDropped', function()
+--- Hook sobrescribible: se llama tras la limpieza interna.
+---@param src integer
+---@param identifier string|nil
+---@param plates string[]  matrículas trackeadas cuyo dueño era src (ahora src = nil)
+---@param reason string|nil
+function Security.OnPlayerDropped(src, identifier, plates, reason) end
+
+--- Hook sobrescribible: se llama tras Config.Security.despawnOnDropMs si el vehículo sigue
+--- existiendo y nadie lo reclamó. server/persistence.lua decide (guardar en garaje / borrar).
+---@param plate string
+---@param netId integer
+---@param identifier string|nil
+function Security.OnDroppedVehicleTimeout(plate, netId, identifier) end
+
+AddEventHandler('playerDropped', function(reason)
     local src = source
+    local ident = Bridge and Bridge.GetIdentifier and Bridge.GetIdentifier(src) or nil
+    local now = GetGameTimer()
+    -- 1) rate limit y contadores (con cooldown por identificador)
+    if ident and buckets[src] and (Security.Config.rateCarryMs or 0) > 0 then
+        carry[ident] = { at = now, buckets = buckets[src] }
+    end
     buckets[src] = nil
     rejectCount[src] = nil
-    for plate, l in pairs(plateLocks) do
-        if l.src == src then plateLocks[plate] = nil end
+    for id, c in pairs(carry) do
+        if (now - c.at) >= (Security.Config.rateCarryMs or 0) then carry[id] = nil end
     end
-    -- Los vehículos spawneados se mantienen trackeados; la política de despawn/
-    -- devolución al garaje la decide server/main.lua.
+    -- 2) solo los locks de este src
+    for plate, l in pairs(plateLocks) do
+        if l.src == src then Security.Unlock(plate, l.token) end
+    end
+    -- 3) spawn tracking: se mantiene, dueño src -> nil
+    local plates = {}
+    for plate, sp in pairs(spawned) do
+        if sp.src == src then
+            sp.src = nil
+            sp.droppedIdent = ident
+            sp.droppedAt = now
+            plates[#plates + 1] = plate
+        end
+    end
+    local delay = Security.Config.despawnOnDropMs
+    if delay and delay > 0 and #plates > 0 then
+        SetTimeout(delay, function()
+            for _, plate in ipairs(plates) do
+                local sp = spawned[plate]
+                -- solo si nadie lo reclamó (src sigue nil) y la entidad existe
+                if sp and sp.src == nil and sp.droppedAt == now then
+                    local ent, netId = Security.GetSpawnedEntity(plate)
+                    if ent then pcall(Security.OnDroppedVehicleTimeout, plate, netId, ident) end
+                end
+            end
+        end)
+    end
+    pcall(Security.OnPlayerDropped, src, ident, plates, reason)
 end)
+
+--- Reasignar un vehículo trackeado a un jugador (p.ej. al reconectar el dueño).
+function Security.ClaimSpawn(plate, src)
+    plate = V.normalizePlate(plate)
+    local sp = plate and spawned[plate]
+    if not sp then return false end
+    sp.src, sp.droppedIdent, sp.droppedAt = src, nil, nil
+    return true
+end
 
 return Security

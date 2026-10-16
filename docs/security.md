@@ -12,11 +12,19 @@ Todo endpoint que cambia estado se registra con `Security.RegisterSecureCallback
 
 Cada handler debe comprobar, según aplique:
 
-- **Propiedad**: matrícula + identificador del jugador (`Bridge.GetIdentifier`) contra BD (`requireOwnership = true` → `Security.IsOwner(src, plate[, allowKeys])`: dueño en `mdp_vehicles.owner` o titular en `mdp_vehicle_keys.holder`, ambos con SQL parametrizado; devuelve `true, 'owner'|'key'`. Acciones solo de dueño (vender, transferir, dar llaves) deben llamar `IsOwner(src, plate, false)`). Tabla por defecto `mdp_vehicles` (`Config.Security.ownedTable` si existe). En `storeVehicle` la matrícula se lee de la entidad en servidor (`GetVehicleNumberPlateText` desde `netId`), nunca del cliente. Nunca aceptar `owner`/`identifier` enviado por el cliente.
+- **Propiedad**: matrícula + identificador del jugador (`Bridge.GetIdentifier`) contra BD (`requireOwnership = true` → `Security.IsOwner(src, plate[, allowKeys])`: dueño en `mdp_vehicles.owner` o titular en `mdp_vehicle_keys.holder`, ambos con SQL parametrizado; devuelve `true, 'owner'|'key'`. Acciones solo de dueño (vender, transferir, dar llaves) deben llamar `IsOwner(src, plate, false)`). Tabla por defecto `mdp_vehicles` (`Config.Security.ownedTable` si existe). Cuando la acción opera sobre una entidad (p.ej. `storeVehicle`), usar `opts.resolvePlate = function(src, data) return Security.PlateFromNetId(data.netId) end`: la matrícula se resuelve en servidor (`NetworkGetEntityFromNetworkId` → `DoesEntityExist` → `GetVehicleNumberPlateText` → normalizar), se guarda en **`data._plate`** y `requireOwnership` usa esa. Si devuelve `nil, err` se rechaza con `plate_unresolved:<err>`. El handler debe usar `data._plate`, nunca `data.plate`; un `_plate` enviado por el cliente se descarta. Nunca aceptar `owner`/`identifier` enviado por el cliente.
 - **Distancia**: jugador ↔ garaje (coords de `Config`) o jugador ↔ vehículo (`GetEntityCoords` en servidor). Distancia máxima en config.
 - **Estado del vehículo** (`VehicleState` en `shared/constants.lua`, columna `mdp_vehicles.state`): `GARAGED=1` / `OUT=0` / `PARKED_WORLD=2` / `IMPOUNDED=3`. Solo se saca lo `GARAGED`; solo se guarda lo `OUT`; solo se libera lo `IMPOUNDED`.
 - **Regla de arquitectura**: ningún *evento* C→S cambia estado ni dinero; todo lo que cambia estado es un *callback* (ver `docs/architecture.md`).
 - **Dinero**: precio calculado en servidor; cobro vía `Bridge.RemoveMoney` y comprobar su retorno **antes** de cambiar estado/spawnear.
+
+### Orden de comprobaciones (`RegisterSecureEvent` / `RegisterSecureCallback`)
+
+1. source válido → 2. rate limit → 3. schema → 4. `resolvePlate` (→ `data._plate`) → 5. job → 6. distancia → 7. propiedad (consulta a BD).
+
+Las comprobaciones baratas van primero; la consulta de propiedad a BD es la última, así una petición lejana o sin permisos nunca llega a la base de datos.
+
+`Security.Config.debug` sigue a `Config.Debug` salvo que se fije `Config.Security.debug` explícitamente.
 
 ## 2. Nunca confiar en datos del cliente/NUI
 
@@ -40,7 +48,7 @@ Argumentos posicionales: `opts.args = {'plate','garageId'}` los convierte en tab
 
 ## 4. Anti-duplicación y anti spawn múltiple
 
-1. **Lock por matrícula**: `Security.Lock(plate, src)` / `Security.Unlock(plate)` (o `Security.WithLock`) alrededor de cualquier transición de estado.
+1. **Lock por matrícula con token**: preferir `Security.WithLock(plate, src, fn, ...)`, que gestiona el token internamente. A bajo nivel, `local token = Security.Lock(plate, src)` devuelve un token único (o `false` si está tomado) y `Security.Unlock(plate, token)` solo libera si el token coincide (si no, registra y devuelve `false`). Un lock caducado (`lockTimeoutMs`, 10 s) se reemplaza con un token nuevo, así que el antiguo dueño ya no puede liberar el lock del nuevo.
 2. **Update atómico con condición de estado** y comprobar filas afectadas:
    ```lua
    local affected = MySQL.update.await(
@@ -67,7 +75,7 @@ Siempre en servidor vía `Bridge.GetJob(src)` → `{ name, grade, onDuty }`. Usa
 ## 7. NUI
 
 **Servidor / Lua cliente (callbacks NUI):**
-- Validar tipos, longitudes y patrones: matrícula: trim + mayúsculas y luego `^[A-Z0-9 ]{1,12}$` (`Utils.IsValidPlate`, `mdp_vehicles.plate VARCHAR(12)`); `garage_id` con formato `public|private|impound:<id>` (`Utils.IsValidGarageId`, schema `garage_id = 'garage'`), y además debe existir en la config del servidor, números enteros con `clamp`.
+- Validar tipos, longitudes y patrones: matrícula: normalizar (trim, espacios internos colapsados, mayúsculas) y luego `^[A-Z0-9 ]{1,8}$` (longitud `Config.PlateMaxLength`, por defecto 8; regla única en `Utils.IsValidPlate`, nunca hardcodear la longitud); `garage_id` con formato `public|private|impound:<id>` (`Utils.IsValidGarageId`, schema `garage_id = 'garage'`), y además debe existir en la config del servidor, números enteros con `clamp`.
 - Rechazar campos desconocidos (schema estricto).
 - `Security.V.sanitizeString` para cualquier texto libre (apodos de vehículo): elimina HTML, controles, recorta longitud.
 - El callback NUI del cliente solo reenvía al servidor; el servidor revalida todo.
@@ -85,12 +93,21 @@ Siempre en servidor vía `Bridge.GetJob(src)` → `{ name, grade, onDuty }`. Usa
 - Registrar operaciones de dinero y cambios de estado (quién, matrícula, garaje, importe).
 - No loguear datos sensibles innecesarios; `debug` incluye payload solo en desarrollo.
 
-## 9. Checklist de revisión (PR)
+## 9. Desconexión (`playerDropped`)
+
+`server/security.lua` aplica esta política:
+1. Borra buckets de rate limit y contador de rechazos del `src`. Si `Config.Security.rateCarryMs` > 0 (30000 por defecto), los buckets se guardan por **identificador** y se restauran al reconectar dentro de ese plazo: reconectar no resetea los límites.
+2. Libera **solo** los locks cuyo dueño es ese `src` (con su propio token).
+3. Mantiene el tracking de vehículos (siguen en el mundo) pero pone su `src = nil`. Con `Config.Security.despawnOnDropMs` (nil por defecto = no hacer nada), tras ese tiempo llama a `Security.OnDroppedVehicleTimeout(plate, netId, identifier)` si el vehículo sigue existiendo y nadie lo reclamó; `server/persistence.lua` decide guardarlo o borrarlo. `Security.ClaimSpawn(plate, src)` reasigna un vehículo al reconectar.
+4. Llama al hook `Security.OnPlayerDropped(src, identifier, plates, reason)`.
+
+## 10. Checklist de revisión (PR)
 
 - [ ] Todo evento de red usa `RegisterSecureEvent`/`RegisterSecureCallback` con `schema` estricto.
 - [ ] `rateLimit` adecuado definido.
+- [ ] Acciones sobre entidad: `resolvePlate` + `data._plate` (nunca matrícula del cliente).
 - [ ] Propiedad verificada por matrícula + identificador en servidor (llaves solo donde proceda; `IsOwner(..., false)` para acciones de dueño).
-- [ ] Matrícula normalizada (12 máx.) y `garage_id` validado con `Utils.IsValidGarageId` + existencia en config.
+- [ ] Matrícula normalizada vía `Utils` (8 máx. por defecto, `Config.PlateMaxLength`) y `garage_id` validado con `Utils.IsValidGarageId` + existencia en config.
 - [ ] Jobs: de servicio salvo `requireDuty = false` justificado.
 - [ ] Distancia comprobada con coords del servidor/config.
 - [ ] Estado (stored/out/impounded) comprobado y cambiado con UPDATE condicional + filas afectadas.
