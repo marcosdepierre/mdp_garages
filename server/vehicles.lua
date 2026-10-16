@@ -1,8 +1,10 @@
 -- mdp_vehicles is the source of truth. This module:
---  * imports rows from framework tables (owned_vehicles / player_vehicles), batched INSERT IGNORE, originals untouched
---  * syncs a player's missing plates on load (Config.SyncFrameworkTables)
+--  * imports rows from framework tables (owned_vehicles / player_vehicles), batched upsert, originals untouched
+--    (INSERT ... ON DUPLICATE KEY UPDATE owner: framework ownership changes propagate; previous owner's keys revoked)
+--  * syncs on player load, on resource start for connected players, and lazily in getVehicles (60 s cache)
 --  * exposes export AddVehicle for dealerships
-Vehicles = {}
+MDP.Vehicles = {}
+local Vehicles = MDP.Vehicles
 local VS = Constants.VehicleState
 
 local schemaCache = {}
@@ -62,10 +64,19 @@ function Vehicles.MapFrameworkRow(framework, r)
 end
 
 --- Batched INSERT IGNORE. Returns inserted count.
+--- Owner-change handling: revoke all keys of the plate and log (QA N3).
+local function onOwnerChanged(plate, oldOwner, newOwner)
+    MySQL.update.await('DELETE FROM mdp_vehicle_keys WHERE plate = ?', { plate })
+    print(('^3[mdp_garages] owner of %s changed %s -> %s (framework sync); keys revoked^0'):format(plate, tostring(oldOwner), tostring(newOwner)))
+end
+Vehicles.OnOwnerChanged = onOwnerChanged
+
+--- Batched upsert. New plates are inserted; existing plates only get their owner updated.
+--- Returns inserted count (new rows), transferred count.
 function Vehicles.InsertBatch(rows)
-    local inserted, size = 0, (Config.Migration and Config.Migration.BatchSize) or 500
+    local inserted, transferred, size = 0, 0, (Config.Migration and Config.Migration.BatchSize) or 500
     for i = 1, #rows, size do
-        local ph, params = {}, {}
+        local ph, params, plates, wanted = {}, {}, {}, {}
         for j = i, math.min(i + size - 1, #rows) do
             local r = rows[j]
             ph[#ph + 1] = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
@@ -74,13 +85,25 @@ function Vehicles.InsertBatch(rows)
                            r.props, r.state, r.garage_id, r.fuel, r.engine, r.body }
             local base = #params
             for n = 1, 10 do params[base + n] = vals[n] end
+            plates[#plates + 1] = r.plate
+            wanted[r.plate] = r.owner
         end
-        local affected = MySQL.update.await(
-            'INSERT IGNORE INTO mdp_vehicles (plate, owner, model, vtype, props, state, garage_id, fuel, engine, body) VALUES '
-            .. table.concat(ph, ', '), params)
-        inserted = inserted + (affected or 0)
+        -- previous owners of plates that already exist
+        local qs = string.rep('?', #plates, ', ')
+        local existing = {}
+        for _, e in ipairs(MySQL.query.await('SELECT plate, owner FROM mdp_vehicles WHERE plate IN (' .. qs .. ')', plates) or {}) do
+            existing[e.plate] = e.owner
+        end
+        MySQL.update.await(
+            'INSERT INTO mdp_vehicles (plate, owner, model, vtype, props, state, garage_id, fuel, engine, body) VALUES '
+            .. table.concat(ph, ', ') .. ' ON DUPLICATE KEY UPDATE owner = VALUES(owner)', params)
+        for _, p in ipairs(plates) do
+            local old = existing[p]
+            if old == nil then inserted = inserted + 1
+            elseif old ~= wanted[p] then transferred = transferred + 1; onOwnerChanged(p, old, wanted[p]) end
+        end
     end
-    return inserted
+    return inserted, transferred
 end
 
 --- Select framework rows (optionally for one owner), map, insert. Returns read, inserted, skipped{reason=n}.
@@ -112,7 +135,9 @@ function Vehicles.ImportFromFramework(framework, owner)
         local m, why = Vehicles.MapFrameworkRow(framework, r)
         if m and m.owner then out[#out + 1] = m else skipped[why or 'no_owner'] = (skipped[why or 'no_owner'] or 0) + 1 end
     end
-    return #rows, (#out > 0 and Vehicles.InsertBatch(out) or 0), skipped
+    local inserted, transferred = 0, 0
+    if #out > 0 then inserted, transferred = Vehicles.InsertBatch(out) end
+    return #rows, inserted, skipped, transferred
 end
 
 ---------------------------------------------------------------------------
@@ -123,7 +148,8 @@ function Vehicles.AddVehicle(owner, plate, model, props, garageId)
     if type(owner) ~= 'string' or owner == '' or #owner > 64 then return false, 'invalid_owner' end
     plate = Utils.NormalizePlate(plate)
     if not Utils.IsValidPlate(plate) then return false, 'invalid_plate' end
-    if type(model) ~= 'string' or not model:match('^[%w_]+$') or #model > 64 then return false, 'invalid_model' end
+    if type(model) == 'number' then model = tostring(math.tointeger(model) or model) end
+    if type(model) ~= 'string' or #model > 64 or not (model:match('^[%w_]+$') or model:match('^%-?%d+$')) then return false, 'invalid_model' end
     local propsJson
     if props ~= nil then
         if type(props) == 'table' then propsJson = json.encode(props)
@@ -133,12 +159,18 @@ function Vehicles.AddVehicle(owner, plate, model, props, garageId)
     end
     garageId = Utils.ResolveGarageId(garageId or Config.DefaultGarage, plate)
     local vtype = (Config.VehicleTypes or {})[model] or 'automobile'
-    local ok, affected = pcall(MySQL.update.await,
-        'INSERT IGNORE INTO mdp_vehicles (plate, owner, model, vtype, props, state, garage_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    local okSel, old = pcall(MySQL.scalar.await, 'SELECT owner FROM mdp_vehicles WHERE plate = ?', { plate })
+    if not okSel then return false, 'db_error' end
+    local ok = pcall(MySQL.update.await,
+        [[INSERT INTO mdp_vehicles (plate, owner, model, vtype, props, state, garage_id) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE owner = VALUES(owner)]],
         { plate, owner, model, vtype, propsJson, VS.GARAGED, garageId })
     if not ok then return false, 'db_error' end
-    if affected ~= 1 then return false, 'plate_exists' end
-    return true
+    if old and old ~= owner then onOwnerChanged(plate, old, owner) end
+    -- also sync the owner's other framework vehicles if they are online (QA N7)
+    local src = Vehicles.FindSourceByIdentifier and Vehicles.FindSourceByIdentifier(owner)
+    if src then CreateThread(function() Vehicles.SyncPlayer(src, true) end) end
+    return true, (old and old ~= owner) and 'transferred' or (old and 'exists' or nil)
 end
 exports('AddVehicle', Vehicles.AddVehicle)
 
@@ -154,23 +186,46 @@ local function claimSpawns(src, ident)
     end
 end
 
-local function syncPlayer(src)
+local lastSync = {} -- identifier -> GetGameTimer() of last framework sync
+
+function Vehicles.FindSourceByIdentifier(ident)
+    for _, id in ipairs(GetPlayers()) do
+        local src = tonumber(id)
+        if src and Bridge.GetIdentifier(src) == ident then return src end
+    end
+    return nil
+end
+
+--- force = ignore the 60 s cache (player load, AddVehicle, startup)
+local function syncPlayer(src, force)
     local ident = Bridge.GetIdentifier(src)
     if not ident then return end
     pcall(claimSpawns, src, ident)
     if not Config.SyncFrameworkTables or Bridge.Framework == 'standalone' then return end
-    local read, inserted = Vehicles.ImportFromFramework(Bridge.Framework, ident)
-    if inserted > 0 then
-        print(('[mdp_garages] synced %d/%d framework vehicles for %s'):format(inserted, read, ident))
+    local now = GetGameTimer()
+    if not force and lastSync[ident] and now - lastSync[ident] < 60000 then return end
+    lastSync[ident] = now
+    local ok, read, inserted, _, transferred = pcall(Vehicles.ImportFromFramework, Bridge.Framework, ident)
+    if not ok then print('^1[mdp_garages] sync failed for ' .. ident .. ': ' .. tostring(read) .. '^0') return end
+    if inserted > 0 or (transferred or 0) > 0 then
+        print(('[mdp_garages] synced %s: %d read, %d new, %d transferred'):format(ident, read, inserted, transferred or 0))
     end
 end
 Vehicles.SyncPlayer = syncPlayer
 
 if Bridge.Framework == 'esx' then
-    AddEventHandler('esx:playerLoaded', function(playerId) CreateThread(function() syncPlayer(playerId) end) end)
+    AddEventHandler('esx:playerLoaded', function(playerId) CreateThread(function() syncPlayer(playerId, true) end) end)
 elseif Bridge.Framework == 'qb' or Bridge.Framework == 'qbx' then
     AddEventHandler('QBCore:Server:PlayerLoaded', function(player)
         local src = player and player.PlayerData and player.PlayerData.source
-        if src then CreateThread(function() syncPlayer(src) end) end
+        if src then CreateThread(function() syncPlayer(src, true) end) end
     end)
+end
+
+--- Called by persistence.lua after startup recovery: sync everyone already connected (resource restart).
+function Vehicles.SyncConnectedPlayers()
+    for _, id in ipairs(GetPlayers()) do
+        local src = tonumber(id)
+        if src then pcall(syncPlayer, src, true) end
+    end
 end

@@ -13,5 +13,14 @@ function Bridge.Fuel.Call(fnName, fallback, ...)
     local impl = Bridge.Fuel.Get()
     local ok, res = Bridge.SafeCall(impl, fnName, ...)
     if ok then return res end
+    -- no adapter / adapter failed: native fallback (Bridge.FuelCommon, Integrations' _native.lua)
+    local FC = Bridge.FuelCommon
+    if FC then
+        local native = (fnName == 'GetFuel' and FC.Get) or (fnName == 'SetFuel' and FC.Set) or nil
+        if native then
+            local okN, resN = pcall(native, ...)
+            if okN then return resN end
+        end
+    end
     return fallback
 end

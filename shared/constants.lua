@@ -14,7 +14,8 @@ Constants.VehicleState = {
 Constants.FineStatus = {
     UNPAID = 0,
     PAID = 1,
-    CLAIMING = 2, -- internal payment in progress (reset to UNPAID on resource start)
+    CHARGING = 2, -- (alias CLAIMING) internal payment in progress; leftovers on start -> channel needs_review (admin /mdp_finereview)
+    CLAIMING = 2, -- deprecated alias of CHARGING
     VOIDED = 3,   -- cancelled (e.g. /mdp_finereview <id> void, server/fine_review.lua by Integrations)
 }
 

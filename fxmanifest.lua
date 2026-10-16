@@ -27,7 +27,7 @@ client_scripts {
     'bridge/notify/*.lua',
     'bridge/fuel/*.lua',
     'bridge/keys/*.lua',
-    'bridge/billing/*.lua',
+    -- bridge/billing/*.lua is server-only (not sent to clients)
     'bridge/phone/*.lua',
     'client/main.lua',
 }
@@ -45,6 +45,7 @@ server_scripts {
     'bridge/billing/*.lua',
     'bridge/phone/*.lua',
     'server/security.lua', -- written by Security Engineer
+    'server/core.lua',
     'server/vehicles.lua',
     'server/persistence.lua',
     'server/garages.lua',

@@ -1,6 +1,6 @@
 -- billing loader (interface only). Adapters are written by Integrations: see docs/integrations.md.
--- Config.Billing = 'auto' or a resource name. Priority when auto: 'okokBilling', 'esx_billing', 'qb-phone'
-local PRIORITY = { 'okokBilling', 'esx_billing', 'qb-phone' }
+-- Config.Billing = 'auto' or a resource name. Priority when auto: 'esx_billing', 'qb-phone', 'okokBilling'
+local PRIORITY = { 'esx_billing', 'qb-phone', 'okokBilling' }
 Bridge.Billing = Bridge.Billing or {}
 
 function Bridge.Billing.Get()
@@ -25,18 +25,27 @@ end
 --   fineId = mdp_fines.id passed in meta. Never trust amounts from the billing event.
 ---------------------------------------------------------------------------
 if Bridge.IsServer then
-    --- Marks an mdp_fines row paid exactly once (atomic). Returns true if it changed.
+    --- Marks an mdp_fines row paid exactly once (atomic, idempotent). Returns true if it changed.
+    --- On a DB error the fine is moved to needs_review and logged (player may have paid the invoice).
     function Bridge.Billing.MarkFinePaid(fineId, source)
         if math.type(fineId) ~= 'integer' then
-            fineId = tonumber(fineId); if not fineId or fineId % 1 ~= 0 then return false end
+            fineId = tonumber(fineId); if not fineId or fineId % 1 ~= 0 then
+                print(('^3[mdp_garages] MarkFinePaid: invalid fineId %s^0'):format(tostring(fineId))); return false
+            end
             fineId = math.tointeger(fineId)
         end
-        if fineId <= 0 then return false end
+        if fineId <= 0 then print(('^3[mdp_garages] MarkFinePaid: invalid fineId %s^0'):format(fineId)); return false end
         local ok, affected = pcall(MySQL.update.await, 'UPDATE mdp_fines SET paid = 1 WHERE id = ? AND paid = 0', { fineId })
-        if ok and affected == 1 then
+        if not ok then
+            print(('^1[mdp_garages] MarkFinePaid: DB error for fine #%d (%s) -> needs_review^0'):format(fineId, tostring(affected)))
+            pcall(MySQL.update.await, 'UPDATE mdp_fines SET channel = ? WHERE id = ? AND paid = 0', { 'needs_review', fineId })
+            return false
+        end
+        if affected == 1 then
             TriggerEvent('mdp_garages:server:finePaid', fineId, source or 'billing')
             return true
         end
+        print(('^3[mdp_garages] MarkFinePaid: fine #%d not unpaid (already paid/voided/missing), ignored^0'):format(fineId))
         return false
     end
 
@@ -48,7 +57,7 @@ if Bridge.IsServer then
     --- Issue a fine. Always recorded in mdp_fines; channel decides the payment path:
     ---   'invoice'      adapter supports fines (SupportsFines ~= false) -> paid in the resource; paid hook -> MarkFinePaid
     ---   'internal'     no adapter, adapter.SupportsFines == false (okokBilling), or SendBill failed without a linked invoice
-    ---   'needs_review' SendBill returned true but no invoice got linked (BillingCommon.HasInvoice false); blocked
+    ---   'needs_review' SendBill returned true but no invoice got linked (Bridge.BillingCommon.HasInvoice false); blocked
     ---                  from payFine, resolved by staff (/mdp_finereview, server/fine_review.lua)
     --- 'external' stays in the ENUM but is unused for fines.
     ---@return integer|nil fineId, string|nil channel
@@ -62,8 +71,20 @@ if Bridge.IsServer then
         end
         reason, issuedBy = clean(reason, 255), clean(issuedBy, 64)
         local CH = Constants.FineChannel
-        local impl = targetSrc and Bridge.Billing.Get() or nil
-        if impl and impl.SupportsFines == false then impl = nil end
+        -- first started adapter (PRIORITY order) that supports fines; okokBilling has SupportsFines = false
+        local impl
+        if targetSrc then
+            local setting = Config.Billing or 'auto'
+            if setting ~= 'auto' then
+                local a = Bridge.ResolveAdapter('billing', setting, {})
+                if a and a.SupportsFines ~= false then impl = a end
+            else
+                for _, res in ipairs(PRIORITY) do
+                    local a = Bridge.ResolveAdapter('billing', res, {})
+                    if a and a.SupportsFines ~= false then impl = a break end
+                end
+            end
+        end
         local channel = impl and CH.INVOICE or CH.INTERNAL
         local fineId = MySQL.insert.await(
             'INSERT INTO mdp_fines (plate, owner, amount, reason, issued_by, channel) VALUES (?, ?, ?, ?, ?, ?)',
@@ -72,7 +93,8 @@ if Bridge.IsServer then
         if channel == CH.INTERNAL then return fineId, channel end
 
         local ok, res = Bridge.SafeCall(impl, 'SendBill', officerSrc, targetSrc, amount, reason, society, { fineId = fineId })
-        local hasInvoice = BillingCommon and BillingCommon.HasInvoice and BillingCommon.HasInvoice(fineId) or false
+        local BC = Bridge.BillingCommon
+        local hasInvoice = BC and BC.HasInvoice and BC.HasInvoice(fineId) or false
         if ok and res == true then
             if hasInvoice then return fineId, CH.INVOICE end
             MySQL.update.await('UPDATE mdp_fines SET channel = ? WHERE id = ? AND paid = ?',
@@ -89,9 +111,10 @@ if Bridge.IsServer then
         return fineId, CH.INVOICE
     end
 
-    --- True if this fine is linked to an external invoice. Delegates to BillingCommon.HasInvoice (Integrations).
+    --- True if this fine is linked to an external invoice. Delegates to Bridge.BillingCommon.HasInvoice (Integrations).
     function Bridge.Billing.IsExternalInvoice(fineId)
-        if BillingCommon and BillingCommon.HasInvoice then return BillingCommon.HasInvoice(fineId) end
+        local BC = Bridge.BillingCommon
+        if BC and BC.HasInvoice then return BC.HasInvoice(fineId) end
         local ok, r = pcall(MySQL.scalar.await, 'SELECT 1 FROM mdp_fine_invoices WHERE fine_id = ? LIMIT 1', { fineId })
         return ok and r ~= nil
     end

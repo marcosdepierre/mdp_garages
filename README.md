@@ -14,7 +14,7 @@ A standalone garage resource for **Qbox (qbx_core)**, **QBCore (qb-core)** and *
 
 ## Installation
 1. Copy `mdp_garages` to your `resources` folder. The NUI is prebuilt in `web/dist`. To rebuild it, run `cd web && npm ci && npm run build`.
-2. **Run `sql/install.sql`** on your database (HeidiSQL or the `mysql` CLI). It isn't applied automatically, and it's safe to re-run. Upgrading from schema v1: the resource adds `mdp_vehicles.vtype` on start, or you can run `sql/upgrade_v2.sql`.
+2. **Run `sql/install.sql`** on your database (HeidiSQL or the `mysql` CLI). It isn't applied automatically, and it's safe to re-run. Databases created by older versions are upgraded automatically on start (missing columns/tables are added idempotently); `sql/upgrade_v2.sql` is a manual alternative for `vtype`. The resource answers `not_ready` until startup recovery has finished.
 3. `server.cfg`. Start order matters:
    ```cfg
    ensure oxmysql
@@ -33,17 +33,18 @@ A standalone garage resource for **Qbox (qbx_core)**, **QBCore (qb-core)** and *
 Tables are prefixed `mdp_` so they don't clash with ESX `owned_vehicles` or QB `player_vehicles`: `mdp_vehicles`, `mdp_vehicle_keys`, `mdp_private_garages`, `mdp_impound`, `mdp_fines`, `mdp_fine_invoices`, `mdp_schema_version`. **`mdp_vehicles` is the source of truth.** Framework tables are only read.
 
 ## Migration and sync
-- **Automatic sync** (`Config.SyncFrameworkTables = true`): when a player loads, any of their plates in the framework table that are missing from `mdp_vehicles` get imported. This means dealership purchases show up without code changes.
+- **Automatic sync** (`Config.SyncFrameworkTables = true`): runs on player load, on resource start for connected players, when the garage is opened (60 s cache) and from `AddVehicle`. Missing plates are imported and owner changes propagate (the previous owner's keys are revoked).
 - **One-off migration:** set `Config.Migration.Enabled = true` (it runs once at start) or run `mdp_migrate` in the console. It imports only the detected framework's table, in batches, with `INSERT IGNORE`. ESX `type`, `job` and `stored` are respected (see `Config.Migration`).
 - **Dealerships** can call the export directly (below).
 
 ## Exports (server)
 ```lua
--- returns ok:boolean, err?:string
-local ok, err = exports.mdp_garages:AddVehicle(owner, plate, model, props, garageId)
+-- returns ok:boolean, info?:string ('exists' | 'transferred') or err
+local ok, info = exports.mdp_garages:AddVehicle(owner, plate, model, props, garageId)
 -- owner: ESX identifier / QB citizenid · plate: 1-8 chars [A-Z0-9 ] · model: spawn name
 -- props: table or JSON (optional) · garageId: 'public:<id>' (optional, defaults to Config.DefaultGarage)
--- errors: invalid_owner, invalid_plate, invalid_model, invalid_props, plate_exists, db_error
+-- model: name or numeric hash. Existing plate with another owner = ownership transfer (previous keys revoked)
+-- errors: invalid_owner, invalid_plate, invalid_model, invalid_props, db_error
 ```
 ## Exports (client)
 `OpenGarageUI(view, data)`, `UpdateGarageUI(data, view?)`, `CloseGarageUI()`.
@@ -67,6 +68,7 @@ Every key is commented in the file as description · values · default. Summary:
 | `MaxMoneyAmount` | `1000000` | cap per money operation |
 | `Fuel` / `Keys` / `Billing` / `Notify` / `Phone` | `'auto'` | integration adapters |
 | `ChargeMode` | `'instant'` | `instant` or `invoice` |
+| `OkokTrustServerEvent` | `false` | okokBilling fees only, unverified server-side event |
 | `MaxGarageDistance` / `MaxVehicleDistance` | `10.0` / `5.0` | server-side distance checks |
 | `PlateMaxLength` | `8` | plate rule 1-8 `[A-Z0-9 ]` |
 | `Security` | `{ownedTable='mdp_vehicles'}` | passed to server/security.lua |

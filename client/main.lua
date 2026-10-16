@@ -8,8 +8,9 @@ local function setClosed()
 end
 
 --- Open the garage UI. view = 'list' | 'detail'
-function UI.Open(view, data)
-    SendNUIMessage({ action = 'open', view = view or 'list', data = data or {}, locale = UILocale() })
+--- plate (optional): vehicle to show in the detail view
+function UI.Open(view, data, plate)
+    SendNUIMessage({ action = 'open', view = view or 'list', data = data or {}, plate = plate, locale = Utils.UILocale() })
     SetNuiFocus(true, true)
     if not UI.open then
         UI.open = true
@@ -18,8 +19,8 @@ function UI.Open(view, data)
 end
 
 --- Partial update: NUI merges `data` onto its current state.
-function UI.Update(data, view)
-    SendNUIMessage({ action = 'update', data = data, view = view })
+function UI.Update(data, view, plate)
+    SendNUIMessage({ action = 'update', data = data, view = view, plate = plate })
 end
 
 function UI.Close()
@@ -35,7 +36,10 @@ exports('CloseGarageUI', UI.Close)
 local function serverCall(name, payload)
     local ok, res, err = pcall(lib.callback.await, name, false, payload)
     if not ok then return { ok = false, error = 'server_error' } end
-    if res == false then return { ok = false, error = err or 'rejected' } end -- Security rejection (false, reason)
+    if res == false then -- Security rejection (false, reason); 'plate_unresolved:<detail>' -> 'plate_unresolved'
+        local code = tostring(err or 'rejected'):match('^([%w_]+)') or 'rejected'
+        return { ok = false, error = code }
+    end
     if type(res) ~= 'table' then return { ok = false, error = 'server_error' } end
     return res
 end
@@ -63,14 +67,19 @@ RegisterNUICallback('takeOut', function(req, cb)
     cb(res)
 end)
 
--- Closing is NUI-only (the NUI handles ESC and calls 'close'). While open, this loop only disables the
+-- Closing is NUI-only (the NUI handles ESC and calls 'close'). No idle loop exists: this thread is started on open,
+-- runs per-frame ONLY while the UI is open, and terminates on close. While open, it only disables the
 -- pause menu controls every frame (plus non-ESC stuck-focus recovery), and exits as soon as the UI is closed.
 function blockPauseWhileOpen()
     CreateThread(function()
-        local graceUntil = GetGameTimer() + 1000
+        local graceUntil, nextFocusCheck = GetGameTimer() + 1000, 0
         while UI.open do
-            -- stuck-focus recovery (not ESC-based): UI marked open but NUI lost focus
-            if GetGameTimer() > graceUntil and not IsNuiFocused() then setClosed() break end
+            -- stuck-focus recovery (not ESC-based), checked every 500 ms, not every frame
+            local now = GetGameTimer()
+            if now > graceUntil and now >= nextFocusCheck then
+                nextFocusCheck = now + 500
+                if not IsNuiFocused() then setClosed() break end
+            end
             DisableControlAction(0, 199, true) -- INPUT_FRONTEND_PAUSE
             DisableControlAction(0, 200, true) -- INPUT_FRONTEND_PAUSE_ALTERNATE
             Wait(0)

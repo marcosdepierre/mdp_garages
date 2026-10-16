@@ -88,3 +88,17 @@ function Utils.GarageAllowsType(garage, vtype)
     for _, t in ipairs(types) do if t == vtype then return true end end
     return false
 end
+
+--- Single model -> hash helper (QA N1). ESX stores numeric hashes ("-344943009"); QB stores names ("adder").
+--- tonumber(model) or joaat(model). Use everywhere models are compared or spawned.
+function Utils.ModelHash(model)
+    if model == nil then return nil end
+    local n = tonumber(model)
+    if n then
+        n = math.tointeger(n) or n
+        -- normalize unsigned 32-bit to signed (GetEntityModel returns signed on server)
+        if n > 0x7FFFFFFF then n = n - 0x100000000 end
+        return n
+    end
+    return joaat(tostring(model))
+end

@@ -7,11 +7,11 @@ local function run(by)
         print('^3[mdp_garages] migration skipped: no framework detected^0')
         return
     end
-    local read, inserted, skipped = Vehicles.ImportFromFramework(fw)
+    local read, inserted, skipped, transferred = MDP.Vehicles.ImportFromFramework(fw)
     local parts = {}
     for why, n in pairs(skipped) do parts[#parts + 1] = why .. '=' .. n end
-    print(('[mdp_garages] migration (%s, by %s): %d read, %d imported, duplicates ignored, skipped: %s')
-        :format(fw, by, read, inserted, #parts > 0 and table.concat(parts, ', ') or 'none'))
+    print(('[mdp_garages] migration (%s, by %s): %d read, %d imported, %d owner changes, skipped: %s')
+        :format(fw, by, read, inserted, transferred or 0, #parts > 0 and table.concat(parts, ', ') or 'none'))
 end
 
 RegisterCommand('mdp_migrate', function(src)

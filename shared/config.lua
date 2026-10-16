@@ -24,10 +24,13 @@ Config.MaxMoneyAmount = 1000000
 Config.Fuel    = 'auto'
 -- Vehicle keys adapter (plate-based) · 'auto' | 'qbx_vehiclekeys' | 'qb-vehiclekeys' · 'auto'
 Config.Keys    = 'auto'
--- Billing adapter, auto order okokBilling > esx_billing > qb-phone · 'auto' | resource name · 'auto'
+-- Billing adapter, auto order esx_billing > qb-phone > okokBilling (okok never used for fines) · 'auto' | resource name · 'auto'
 Config.Billing = 'auto'
 -- How fees are charged (Integrations) · 'instant' (Bridge.RemoveMoney now) | 'invoice' (billing adapter) · 'instant'
 Config.ChargeMode = 'instant'
+-- okokBilling only (fees with ChargeMode = 'invoice', never fines): trust TriggerEvent('okokBilling:CreateCustomInvoice')
+-- from the server. UNVERIFIED whether okok accepts it without a client source · boolean · false
+Config.OkokTrustServerEvent = false
 -- Notify: 'auto' = ox_lib then framework native; 'framework' = the started core's notify · 'auto' | 'ox_lib' | 'framework' | resource · 'auto'
 Config.Notify  = 'auto'
 -- Phone app adapter · 'auto' | 'lb-phone' | 'npwd' | 'qb-phone' · 'auto'

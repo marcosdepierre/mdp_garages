@@ -28,7 +28,8 @@ function _L(key, ...)
 end
 
 --- UI strings table for the NUI: active locale's `ui` merged over English (missing keys fall back).
-function UILocale()
+Utils = Utils or {}
+function Utils.UILocale()
     local out = {}
     for k, v in pairs((Locales.en and Locales.en.ui) or {}) do out[k] = v end
     local lang = Locales[Config.Locale]
