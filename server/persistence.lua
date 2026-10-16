@@ -101,7 +101,7 @@ local function onStart()
     --   c) our tagged entities (mdp_plate) whose row is not 0/2 -> orphan, deleted
     local world = Utils.WorldVehiclesByPlate()
     local rows = MySQL.query.await('SELECT plate, model, state, coords FROM mdp_vehicles WHERE state IN (?, ?)', { VS.OUT, VS.PARKED_WORLD }) or {}
-    local wanted, dupPlates, adopted, parked, garaged = {}, {}, 0, 0, 0
+    local wanted, dupPlates, keepOut, adopted, parked, garaged = {}, {}, {}, 0, 0, 0
     local mode = Config.OnRestartOutVehicles or 'park'
     for _, r in ipairs(rows) do
         local plate, st = r.plate, tonumber(r.state)
@@ -121,7 +121,7 @@ local function onStart()
             -- accepted exception: (a) state OUT, (b) IsServerEntity, (c) model already matched (CanAdopt checks model before
             -- occupied/moved), (d) tracked with owner nil, no ClaimSpawn to the driver (N4), (f) later saves validate coords (L4)
             if not can and st == VS.OUT and (why == 'occupied' or why == 'moved') and Security.IsServerEntity(ent, plate)
-                and GetEntityModel(ent) == Utils.ModelHash(r.model) then
+                and Utils.SameModel(GetEntityModel(ent), Utils.ModelHash(r.model)) then
                 print(('^3[mdp_garages] restart: %s adopted despite %s (own server entity, state OUT)^0'):format(plate, why)) -- (e)
                 can = true
             end
@@ -130,8 +130,9 @@ local function onStart()
                     print(('^3[mdp_garages] restart: entity for %s not adoptable (%s), deleted^0'):format(plate, tostring(why)))
                     DeleteEntity(ent)
                 else
-                    print(('^3[mdp_garages] restart: entity for %s not adoptable (%s) and occupied, ignored^0'):format(plate, tostring(why)))
+                    print(('^3[mdp_garages] restart: entity for %s not adoptable (%s) and occupied, ignored; row kept OUT^0'):format(plate, tostring(why)))
                     dupPlates[plate] = true -- never treated as orphan
+                    keepOut[plate] = true   -- P1R3-H1: never GARAGED while an occupied matching entity exists
                 end
                 ent = nil
             end
@@ -154,6 +155,8 @@ local function onStart()
                     if n == 1 then parked = parked + 1 end
                 end
             end
+        elseif st == VS.OUT and keepOut[plate] then
+            -- P1R3-H1: occupied unmarked entity (pre-a8fda43 spawn, dealership…) -> stays OUT, owner stores it normally
         elseif st == VS.OUT and matches > 1 then
             -- R6-1: ambiguous duplicates in the world -> keep OUT (never GARAGED, which would allow a third copy)
             print(('^3[mdp_garages] restart: %s kept OUT (ambiguous world duplicates, needs review)^0'):format(plate))

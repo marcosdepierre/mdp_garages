@@ -164,8 +164,15 @@ end
 function Utils.UniqueWorldVehicle(map, plate, modelHash)
     local found, n = nil, 0
     for _, veh in ipairs(map[plate] or {}) do
-        if GetEntityModel(veh) == modelHash then found = veh; n = n + 1 end
+        if Utils.SameModel(GetEntityModel(veh), modelHash) then found = veh; n = n + 1 end
     end
     if n == 1 then return found, 1 end
     return nil, n
+end
+
+--- R3-1: compare model hashes as unsigned 32-bit (signed/unsigned/negative ESX hashes all match).
+function Utils.SameModel(a, b)
+    a, b = tonumber(a), tonumber(b)
+    if not a or not b then return false end
+    return ((math.tointeger(a) or 0) & 0xFFFFFFFF) == ((math.tointeger(b) or 0) & 0xFFFFFFFF)
 end

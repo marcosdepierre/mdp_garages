@@ -121,3 +121,7 @@ set sv_entityLockdown relaxed                           # or strict
 set sv_filterRequestControl 2
 ```
 See docs/architecture.md (Phase 1 security re-review) and docs/security.md.
+
+## Release notes / upgrading
+- **a8fda43 (phase 1, server entity mark):** vehicles spawned before this version carry no server mark. On the **first restart after updating**, such entities can't be adopted: if empty they are **deleted** (parked cars are respawned by the streamer from the DB, nothing is lost); if **occupied** they are **ignored** and their DB row stays OUT, so the owner can store them normally (no duplicate, P1R3-H1).
+- **Strongly recommended:** set `set mdp_garages_entity_secret "<long random string>"` in server.cfg so the server mark is stable and unforgeable across restarts.

@@ -202,7 +202,7 @@ local function lockedVehicleChecks(src, plate, veh, evName)
     local row = MySQL.single.await([[SELECT plate, owner, model, state, fuel, mileage,
         UNIX_TIMESTAMP(COALESCE(parked_at, updated_at)) AS mileage_ts FROM mdp_vehicles WHERE plate = ?]], { plate })
     if not row or tonumber(row.state) == VS.REMOVED then return nil, 'not_found' end
-    if GetEntityModel(veh) ~= Utils.ModelHash(row.model) then return nil, 'invalid_request' end
+    if not Utils.SameModel(GetEntityModel(veh), Utils.ModelHash(row.model)) then return nil, 'invalid_request' end
     local tracked = Security.GetSpawnedEntity(plate)
     if tracked and tracked ~= veh then
         -- another tracked entity has this plate: this one is a clone
