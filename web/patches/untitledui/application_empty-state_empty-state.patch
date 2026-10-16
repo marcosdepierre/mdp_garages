@@ -1,0 +1,58 @@
+--- a/src/components/application/empty-state/empty-state.tsx
++++ b/src/components/application/empty-state/empty-state.tsx
+@@ -1,6 +1,6 @@
+-import type { ComponentProps, ComponentPropsWithRef, ReactNode } from "react";
++import type { ComponentPropsWithRef, ReactNode } from "react";
+ import { Children, createContext, isValidElement, useContext } from "react";
+-import { FileIcon } from "@untitledui/file-icons";
++// mdp patch (QC N3): FileTypeIcon / @untitledui/file-icons removed (232 KB, unused).
+ import { SearchLg } from "@untitledui/icons";
+ import { FeaturedIcon as FeaturedIconbase } from "@/components/foundations/featured-icon/featured-icon";
+ import type { BackgroundPatternProps } from "@/components/shared-assets/background-patterns";
+@@ -31,7 +31,7 @@
+     return <FeaturedIconbase {...props} {...{ color, theme, icon }} size={!size && rootSize === "lg" ? "xl" : size || "lg"} />;
+ };
+ 
+-const Illustration = ({ type = "cloud", color = "gray", size = "lg", ...props }: ComponentPropsWithRef<typeof Illustrations>) => {
++const Illustration = ({ type = "box", /* mdp patch: was "cloud" */ color = "gray", size = "lg", ...props }: ComponentPropsWithRef<typeof Illustrations>) => {
+     const { size: rootSize } = useContext(RootContext);
+ 
+     return (
+@@ -45,21 +45,6 @@
+     );
+ };
+ 
+-interface FileTypeIconProps extends ComponentPropsWithRef<"div"> {
+-    /** Which file type the icon depicts, forwarded to `FileIcon` from `@untitledui/file-icons`. */
+-    type?: ComponentProps<typeof FileIcon>["type"];
+-    /** Drawing style of the file icon, forwarded to `FileIcon` as its `variant`. */
+-    theme?: ComponentProps<typeof FileIcon>["variant"];
+-}
+-
+-const FileTypeIcon = ({ type = "folder", theme = "solid", ...props }: FileTypeIconProps) => {
+-    return (
+-        <div {...props} className={cx("relative z-10 flex rounded-full bg-linear-to-b from-neutral-50 to-neutral-200 p-8", props.className)}>
+-            <FileIcon type={type} variant={theme} className="size-10 drop-shadow-sm" />
+-        </div>
+-    );
+-};
+-
+ interface HeaderProps extends ComponentPropsWithRef<"div"> {
+     /** Decorative background pattern drawn behind the header's icon or illustration and centred on it. Pass `"none"` to render the header without a pattern. */
+     pattern?: "none" | BackgroundPatternProps["pattern"];
+@@ -333,7 +318,6 @@
+     Description: typeof Description;
+     Illustration: typeof Illustration;
+     FeaturedIcon: typeof FeaturedIcon;
+-    FileTypeIcon: typeof FileTypeIcon;
+     AvatarRadius: typeof AvatarRadius;
+     AvatarRow: typeof AvatarRow;
+     AvatarGrid: typeof AvatarGrid;
+@@ -346,7 +330,6 @@
+ EmptyState.Description = Description;
+ EmptyState.Illustration = Illustration;
+ EmptyState.FeaturedIcon = FeaturedIcon;
+-EmptyState.FileTypeIcon = FileTypeIcon;
+ EmptyState.AvatarRadius = AvatarRadius;
+ EmptyState.AvatarRow = AvatarRow;
+ EmptyState.AvatarGrid = AvatarGrid;

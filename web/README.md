@@ -36,12 +36,19 @@ npm run build      # tsc + vite build → web/dist (commit it; FiveM serves it a
 Production build outside FiveM shows nothing and fetchNui returns `{ok:false,error:'server_error'}` (no mocks shipped).
 Add components: `npx untitledui@latest add <name> -y` (FREE only; Alerts, Section headers are PRO).
 
+## Untitled UI patches
+4 approved local patches — see `UNTITLEDUI_PATCHES.md` and `patches/untitledui/`.
+
+## Tests
+`tests/n16-row-select.mjs` (playwright-core + system Chrome, mock mode): `npx vite --port 5190 & BASE_URL=http://localhost:5190 npm run test:e2e`. Not part of the build.
+
 ## Behaviour / API
 - `fetchNui<E>(event, data): Promise<{ ok, error?, data? }>` — POST `https://${GetParentResourceName() ?? 'mdp_garages'}/${event}`, 10 s timeout → `error:'timeout'`.
 - Lua → NUI: `open {view, data:{garage, vehicles}, locale?, plate?}`, `update {data (merged), view?, plate?}` (ignored before the first `open`), `close` (hide).
 - ESC: `preventDefault` + `fetchNui('close')` only; the panel hides when that callback answers (or times out), or on a Lua `close` message.
 - Take out enabled for state 1 (garaged) and 2 (parked_world); 3 impounded = display only; 4 retired = 'Retired' section, no button; disabled if `open` had no `garage`.
 - Error codes: `NUI_ERROR_CODES` = docs/architecture.md "Error codes (single source of truth)"; unknown codes → `rejected`.
+- Rows: single click (or Enter) selects + opens detail; selected row highlighted; retired rows not selectable.
 - `takeOut` ok → hide (Lua `UI.Close()` also sends `close`); error → localized `err_<code>` Badge.
 - No `innerHTML` / `dangerouslySetInnerHTML` in our source.
 

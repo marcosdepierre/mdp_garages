@@ -15,10 +15,18 @@ export function VehicleTable({ label, vehicles, selected, onSelect }: {
     <Table
       aria-label={label}
       size="sm"
+      // N16: single click selects AND opens detail (onSelectionChange); Enter/Space select too.
+      // Controlled selectedKeys keep the row highlighted. Retired table: no onSelect → selectionMode 'none'.
       selectionMode={onSelect ? 'single' : 'none'}
       selectionBehavior="replace"
+      disallowEmptySelection
       selectedKeys={selected ? [selected] : []}
-      onRowAction={onSelect ? (key) => { const v = vehicles.find((x) => x.plate === key); if (v) onSelect(v); } : undefined}
+      onSelectionChange={onSelect ? (keys) => {
+        if (keys === 'all') return;
+        const key = [...keys][0];
+        const v = vehicles.find((x) => x.plate === key);
+        if (v) onSelect(v);
+      } : undefined}
     >
       <Table.Header>
         <Table.Head id="label" isRowHeader label={t('model')} />

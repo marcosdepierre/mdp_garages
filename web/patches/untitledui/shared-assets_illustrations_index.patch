@@ -1,0 +1,18 @@
+--- a/src/components/shared-assets/illustrations/index.tsx
++++ b/src/components/shared-assets/illustrations/index.tsx
+@@ -1,14 +1,9 @@
++// mdp patch (QC N3): only the 'box' illustration is bundled.
+ import type { HTMLAttributes } from "react";
+ import { BoxIllustration } from "./box";
+-import { CloudIllustration } from "./cloud";
+-import { CreditCardIllustration } from "./credit-card";
+-import { DocumentsIllustration } from "./documents";
+ 
+ const types = {
+     box: BoxIllustration,
+-    cloud: CloudIllustration,
+-    documents: DocumentsIllustration,
+-    "credit-card": CreditCardIllustration,
+ };
+ 
+ export interface IllustrationProps extends HTMLAttributes<HTMLDivElement> {

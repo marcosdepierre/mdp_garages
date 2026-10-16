@@ -1,0 +1,19 @@
+--- a/src/components/shared-assets/background-patterns/index.tsx
++++ b/src/components/shared-assets/background-patterns/index.tsx
+@@ -1,15 +1,10 @@
++// mdp patch (QC N3): only the 'circle' pattern is bundled.
+ import type { SVGProps } from "react";
+ import { cx } from "@/utils/cx";
+ import { Circle } from "./circle";
+-import { Grid } from "./grid";
+-import { GridCheck } from "./grid-check";
+-import { Square } from "./square";
+ 
+ const patterns = {
+     circle: Circle,
+-    square: Square,
+-    grid: Grid,
+-    "grid-check": GridCheck,
+ };
+ 
+ export interface BackgroundPatternProps extends Omit<SVGProps<SVGSVGElement>, "size"> {
