@@ -130,18 +130,25 @@ local function resolveVehicleType(veh, model, clientClass)
     return 'automobile'
 end
 
+--- Shared resolver for every netId-based handler (store, parkWorld, tow, fine, impound, syncWear).
+function Vehicles.ResolvePlateFromNetId(_, data)
+    local plate, err = Security.PlateFromNetId(data and data.netId)
+    return plate, err
+end
+
 Security.RegisterSecureCallback('mdp_garages:storeVehicle', {
     rateLimit = { max = 1, windowMs = 1000 },
     schema = { netId = Security.Int(1, 65535), garage_id = Security.V.isGarageId, vclass = Security.Optional(Security.Int(0, 22)) },
+    resolvePlate = Vehicles.ResolvePlateFromNetId, -- server-side plate -> data._plate
+    requireOwnership = true,              -- owner or key holder, checked on data._plate
     distance = { getCoords = garageCoords, max = Config.MaxGarageDistance },
 }, function(src, data)
     local garage, gerr = Utils.GetGarage(data.garage_id, GARAGE_KINDS)
     if not garage then return { ok = false, error = gerr } end
-    local veh = NetworkGetEntityFromNetworkId(data.netId)
-    if not veh or veh == 0 or not DoesEntityExist(veh) or GetEntityType(veh) ~= 2 then return { ok = false, error = 'invalid_request' } end
+    local plate = data._plate
+    local _, _, veh = Security.PlateFromNetId(data.netId)
+    if not veh then return { ok = false, error = 'invalid_request' } end
     if not Security.IsNear(src, GetEntityCoords(veh), Config.MaxVehicleDistance) then return { ok = false, error = 'too_far' } end
-    local plate = Utils.NormalizePlate(GetVehicleNumberPlateText(veh))
-    if not Utils.IsValidPlate(plate) or not Security.IsOwner(src, plate) then return { ok = false, error = 'not_owner' } end
     local row = MySQL.single.await('SELECT model, state FROM mdp_vehicles WHERE plate = ?', { plate })
     if not row then return { ok = false, error = 'not_owner' } end
     if GetEntityModel(veh) ~= joaat(row.model) then return { ok = false, error = 'invalid_request' } end

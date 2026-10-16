@@ -13,6 +13,7 @@ fxmanifest.lua
 shared/      config.lua (every key commented), constants.lua (Constants.VehicleState, SchemaVersion), locale.lua, utils.lua
 locales/     en.lua, es.lua
 bridge/
+  cache.lua           identifier cache (works inside playerDropped)
   init.lua            framework detection, standalone defaults, adapter registry, SafeCall
   framework/          qbx.lua, qb.lua, esx.lua (only the detected one activates)
   notify/init.lua     Bridge.Notify loader (adapter -> ox_lib -> framework native)
@@ -79,6 +80,8 @@ All state-changing endpoints are registered with **`Security.RegisterSecureCallb
   - `Security.IsOwner(src, plate, false)`: **owner only** (used for giving/removing keys, private-garage purchase, and so on).
 - `distance = {getCoords = fn(src,data), max = n}`. Coords are always resolved from server config or the server entity, never from the payload, and checked with `Security.IsNear`.
 
+- `resolvePlate = Vehicles.ResolvePlateFromNetId`: wraps `Security.PlateFromNetId(netId) -> plate, nil, ent | nil, err`. The server-side plate is stored in `data._plate`; any `_plate` the client sends is stripped. A failure rejects with `plate_unresolved:<err>` (`bad_netid`, `no_entity`, `not_vehicle`, `bad_plate`). `requireOwnership` then checks `data._plate`. **Every netId-based handler** (storeVehicle, parkWorld, towVehicle, issueFine, impoundVehicle, syncWear) uses it, and handlers only ever use `data._plate`.
+
 Other helpers: `Security.WithLock(plate, src, fn, ...)` (per-plate lock, released even if `fn` errors) / `Security.Lock(plate, src)` / `Unlock(plate)`, `Security.IsKeyHolder`, `Security.TrackSpawn` / `UntrackSpawn` / `GetSpawnedEntity` (spawn registry by plate), `Security.RateLimit`, `Security.V.*` validators, `Security.LogReject`, and the `Security.OnSuspicious` hook.
 
 ## Source of truth and framework tables
@@ -106,12 +109,18 @@ On `onResourceStop`, positions of live vehicles are saved (they stay OUT, and th
 - Migration and sync: ESX `type` boat/airplane/helicopter map to boat/plane/heli; QB rows default to automobile; `Config.VehicleTypes` overrides apply.
 
 ## Disconnect policy (`Config.OnDisconnect`)
-On `playerDropped`, the policy applies only if the player was **driving** (seat -1) one of our tracked vehicles (state bag `mdp_plate` plus `Security.GetSpawnedEntity`). Everything runs inside `Security.WithLock(plate, src, fn)` with atomic `UPDATE … WHERE plate=? AND state=0`.
+`server/security.lua` owns `playerDropped`. It carries the player's rate limits for 30 s, releases their locks, and keeps their spawned vehicles tracked with owner `nil`. It then calls the hook **`Security.OnPlayerDropped(src, identifier, plates, reason)`**, which we implement in `server/persistence.lua`; we have no `playerDropped` handler of our own for vehicles.
+
+For each listed plate the player was **driving** (seat -1; if the ped is already gone, a vehicle with no driver counts), the policy runs inside `Security.WithLock(plate, 0, fn)` with atomic `UPDATE … WHERE plate=? AND state=0`:
 | value | effect |
 |---|---|
-| `keep` (default) | state 2 at the vehicle's position, `parked_at=NOW()`; coords, heading and health (server natives) saved; the entity stays |
+| `keep` (default) | state 2 at the vehicle's position, `parked_at=NOW()`; coords, heading and health (server natives) saved; the entity stays tracked (owner nil) |
 | `garage` | state 1 in `Config.DefaultGarage`, health saved, entity deleted and untracked |
 | `impound` | state 3 in `Config.DefaultImpound`, plus an `mdp_impound` row using `Config.ImpoundReasons[Config.DisconnectImpoundReason]` (fee and hours computed server-side), entity deleted |
+
+- **Timeout (optional):** `Config.Security.despawnOnDropMs`. Unclaimed vehicles after the timeout trigger `Security.OnDroppedVehicleTimeout(plate, netId, identifier)`, which saves the vehicle and sends it to `DefaultGarage`. It's disabled by default because it would also garage `keep` cars.
+- **Reconnect:** on player load, the owner's vehicles in state 0/2 that are still tracked are handed back with `Security.ClaimSpawn(plate, src)`.
+- **Identifier inside playerDropped:** ESX, QB and Qbox drop their player object in their own `playerDropped` handlers, and handler order between resources is undefined. So `bridge/cache.lua` wraps `Bridge.GetIdentifier` with a per-source cache (filled on player load and on every successful lookup, cleared 35 s after the drop). Security's rate-limit carry and the hook therefore always get the identifier.
 
 ## Garages and zones
 Public, impound and private garage entrances are **ox_lib zones** (`lib.zones.sphere`/`box`) created client-side from shared config. Entering a zone shows a `lib.showTextUI` prompt, and the interaction opens the NUI. The server never trusts the zone: it re-checks distance against server config coords (10 m).
@@ -242,16 +251,16 @@ All request/response endpoints use **ox_lib `lib.callback`** only (there is no e
 |---|---|---|---|---|---|
 | `mdp_garages:getVehicles` | lib.callback | C→S | NUI `getVehicles` | `{garage_id}` | RATE(5/10s), schema `garage_id=V.isGarageId`, GAR(`{public,private}`), DIST(garage 10 m); returns only vehicles the player owns or holds keys for, coords filtered by the visibility rule |
 | `mdp_garages:takeOut` | lib.callback | C→S | NUI `takeOut` | `{plate, garage_id}` | schema (`plate`, `V.isGarageId`), RATE(1/s), GAR(`{public,private}`), DIST(garage), `requireOwnership` (owner or key holder), fines threshold if enabled; inside `WithLock(plate, src, fn)`: `GetSpawnedEntity(plate)` must be nil, ATOM(1→0), `CreateVehicleServerSetter` at a `GetGarage().spawns` point, `TrackSpawn` |
-| `mdp_garages:storeVehicle` | lib.callback | C→S | player in a garage zone | `{netId, garage_id, vclass?}` | **Implemented** (`server/garages.lua`). RATE(1/s), schema, GAR(`{public,private}`), DIST(garage 10 m + vehicle 5 m). Entity from `NetworkGetEntityFromNetworkId`, must be a vehicle; plate read server-side (`Utils.NormalizePlate(GetVehicleNumberPlateText)`), then `Security.IsOwner` called manually; model must match the DB; vtype resolved and checked against `garage.types`. Inside `WithLock(plate, src, fn)`: `UPDATE … WHERE state IN (0,2)` (affectedRows == 1) saving vtype and server-read health, `UntrackSpawn`, delete entity |
-| `mdp_garages:parkWorld` | lib.callback | C→S | player parks on the street | `{netId}` | RATE(1/s), DIST(vehicle 5 m), plate read server-side, OWN, world limits (refused with `world_limit` + notify), `WithLock(plate, src, fn)`, ATOM(0→2), sets `parked_at`, coords/heading read from the server entity |
+| `mdp_garages:storeVehicle` | lib.callback | C→S | player in a garage zone | `{netId, garage_id, vclass?}` | **Implemented** (`server/garages.lua`). RATE(1/s), schema, GAR(`{public,private}`), DIST(garage 10 m + vehicle 5 m). `resolvePlate` (`Security.PlateFromNetId`: entity must exist and be a vehicle, plate read and normalized server-side) → `data._plate`, `requireOwnership` on `data._plate`; model must match the DB; vtype resolved and checked against `garage.types`. Inside `WithLock(plate, src, fn)`: `UPDATE … WHERE state IN (0,2)` (affectedRows == 1) saving vtype and server-read health, `UntrackSpawn`, delete entity |
+| `mdp_garages:parkWorld` | lib.callback | C→S | player parks on the street | `{netId}` | RATE(1/s), DIST(vehicle 5 m), `resolvePlate` → `data._plate`, OWN, world limits (refused with `world_limit` + notify), `WithLock(plate, src, fn)`, ATOM(0→2), sets `parked_at`, coords/heading read from the server entity |
 | `mdp_garages:client:applyProps` | event | S→C | server after spawning a persistent car | `{netId, props}` | server-originated; client only applies props |
-| `mdp_garages:syncWear` | lib.callback | C→S | client every N min while driving / on exit | `{netId, mileageDelta}` | RATE, src is the driver, plate read server-side, OWN/key, delta clamped by max plausible speed × time. **Health is read server-side** (`GetVehicleEngineHealth`/`GetVehicleBodyHealth` on the server entity), never from the client; fuel via `Bridge.Fuel` |
+| `mdp_garages:syncWear` | lib.callback | C→S | client every N min while driving / on exit | `{netId, mileageDelta}` | RATE, src is the driver, `resolvePlate` → `data._plate`, OWN/key, delta clamped by max plausible speed × time. **Health is read server-side** (`GetVehicleEngineHealth`/`GetVehicleBodyHealth` on the server entity), never from the client; fuel via `Bridge.Fuel` |
 | `mdp_garages:giveKey` | lib.callback | C→S | owner shares a key | `{plate, target}` | schema, RATE, OWN! (`IsOwner(src, plate, false)`), target player within 5 m, max keys per vehicle; `Bridge.Keys` adapter |
 | `mdp_garages:removeKey` | lib.callback | C→S | owner revokes a key | `{plate, holder}` | schema, RATE, OWN! |
-| `mdp_garages:issueFine` | lib.callback | C→S | police / parking warden | `{netId, reason}` | JOB (`requireDuty` default true), DIST(vehicle), plate read from the entity server-side, amount from config (AMT), RATE; `Bridge.Billing.IssueFine` |
+| `mdp_garages:issueFine` | lib.callback | C→S | police / parking warden | `{netId, reason}` | JOB (`requireDuty` default true), DIST(vehicle), `resolvePlate` → `data._plate`, amount from config (AMT), RATE; `Bridge.Billing.IssueFine` |
 | `mdp_garages:payFine` | lib.callback | C→S | player / phone app | `{fineId}` | RATE, fine owner == identifier, AMT, `UPDATE … WHERE id=? AND paid=0` (ATOM) |
-| `mdp_garages:towVehicle` | lib.callback | C→S | tow job | `{netId}` | RATE(1/s), JOB (on duty), DIST(vehicle), plate read server-side, `WithLock(plate, src, fn)`, ATOM(→3), insert into `mdp_impound` |
-| `mdp_garages:impoundVehicle` | lib.callback | C→S | police | `{netId, reasonId, garage_id='impound:<id>'}` | RATE(1/s), JOB+minGrade (on duty), GAR(`impound`), DIST(vehicle), plate read server-side, **fee and release_after computed server-side from `Config.ImpoundReasons[reasonId]`** (client sends no amounts), `WithLock`, ATOM(→3) |
+| `mdp_garages:towVehicle` | lib.callback | C→S | tow job | `{netId}` | RATE(1/s), JOB (on duty), DIST(vehicle), `resolvePlate` → `data._plate`, `WithLock(plate, src, fn)`, ATOM(→3), insert into `mdp_impound` |
+| `mdp_garages:impoundVehicle` | lib.callback | C→S | police | `{netId, reasonId, garage_id='impound:<id>'}` | RATE(1/s), JOB+minGrade (on duty), GAR(`impound`), DIST(vehicle), `resolvePlate` → `data._plate`, **fee and release_after computed server-side from `Config.ImpoundReasons[reasonId]`** (client sends no amounts), `WithLock`, ATOM(→3) |
 | `mdp_garages:releaseImpound` | lib.callback | C→S | owner at the impound lot | `{plate, garage_id='impound:<id>'}` | RATE, GAR(`impound` only), DIST(lot), OWN!, `release_after <= NOW()`, fee from `mdp_impound` via RemoveMoney (AMT), `WithLock(plate, src, fn)`, ATOM(3→1) |
 | `mdp_garages:client:setGps` | event | S→C | server after an impound or on request | `{x,y,z}` | server-originated |
 | `mdp_garages:buyPrivateGarage` | lib.callback | C→S | player at a property | `{config_id}` | schema, RATE(1/s), private-garage config lookup, DIST, price from config (AMT). `INSERT` first (UNIQUE(owner, config_id) rejects duplicates), then charge; if the charge fails, `DELETE` the row, all inside a per-owner lock |

@@ -42,8 +42,12 @@ Config.MaxGarageDistance = 10.0
 Config.MaxVehicleDistance = 5.0
 -- Max plate length after normalization (GTA plates are 8; DB column is VARCHAR(12)) · 1-8 · 8
 Config.PlateMaxLength = 8
--- Passed to server/security.lua (Security Engineer) · table · { ownedTable = 'mdp_vehicles' }
-Config.Security = { ownedTable = 'mdp_vehicles' }
+-- Passed to server/security.lua (Security Engineer) · table
+--   ownedTable: vehicles table · 'mdp_vehicles'
+--   despawnOnDropMs: after a player drops, vehicles still tracked and unclaimed after this many ms are saved and sent
+--                    to DefaultGarage (Security.OnDroppedVehicleTimeout). nil = disabled · integer|nil · nil
+--                    Note: with OnDisconnect = 'keep' this would garage the cars left parked; enable deliberately.
+Config.Security = { ownedTable = 'mdp_vehicles', despawnOnDropMs = nil }
 
 ---------------------------------------------------------------------------
 -- Source of truth / framework tables

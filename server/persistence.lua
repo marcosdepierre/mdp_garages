@@ -72,44 +72,63 @@ AddEventHandler('onResourceStop', function(res)
 end)
 
 ---------------------------------------------------------------------------
--- Disconnect policy (Config.OnDisconnect): only for a tracked vehicle the player was DRIVING.
+-- Disconnect policy (Config.OnDisconnect) via Security.OnPlayerDropped (server/security.lua owns playerDropped).
+-- Security has already released the player's locks and kept their spawns tracked with owner = nil.
+-- Applies to each tracked vehicle of the player that they were DRIVING (or, if the ped is already gone, that has no driver).
 ---------------------------------------------------------------------------
-local function onDropped(src)
-    local ped = GetPlayerPed(src)
-    if not ped or ped == 0 then return end
-    local veh = GetVehiclePedIsIn(ped, false)
-    if not veh or veh == 0 or GetPedInVehicleSeat(veh, -1) ~= ped then return end
-    local plate = Entity(veh).state.mdp_plate
-    plate = plate and Utils.NormalizePlate(plate)
-    if not plate or not Security.GetSpawnedEntity(plate) then return end
-    local mode = Config.OnDisconnect or 'keep'
-    local c, h = GetEntityCoords(veh), GetEntityHeading(veh)
-    local engine, body = GetVehicleEngineHealth(veh), GetVehicleBodyHealth(veh)
-    pcall(Security.WithLock, plate, src, function()
-        if mode == 'garage' then
-            local n = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, garage_id = ?, engine = ?, body = ?, coords = NULL, parked_at = NULL WHERE plate = ? AND state = ?',
-                { VS.GARAGED, Config.DefaultGarage, engine, body, plate, VS.OUT })
-            if n == 1 then Security.UntrackSpawn(plate); DeleteEntity(veh) end
-        elseif mode == 'impound' then
-            local reason = (Config.ImpoundReasons or {})[Config.DisconnectImpoundReason] or { label = 'Abandoned', fee = 0, hours = 0 }
-            local n = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, garage_id = ?, engine = ?, body = ?, coords = NULL, parked_at = NULL WHERE plate = ? AND state = ?',
-                { VS.IMPOUNDED, Config.DefaultImpound, engine, body, plate, VS.OUT })
-            if n == 1 then
-                MySQL.insert.await([[INSERT INTO mdp_impound (plate, reason, officer, fee, release_after, location)
-                    VALUES (?, ?, 'system:disconnect', ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? HOUR), ?)]],
-                    { plate, reason.label, math.tointeger(reason.fee) or 0, math.tointeger(reason.hours) or 0, Config.DefaultImpound })
-                Security.UntrackSpawn(plate); DeleteEntity(veh)
-            end
-        else -- keep: stays in the world as parked
-            MySQL.update.await([[UPDATE mdp_vehicles SET state = ?, coords = ?, heading = ?, engine = ?, body = ?,
-                parked_at = CURRENT_TIMESTAMP WHERE plate = ? AND state = ?]],
-                { VS.PARKED_WORLD, json.encode({ x = c.x, y = c.y, z = c.z }), h, engine, body, plate, VS.OUT })
-        end
-    end)
+local function healthOf(veh) return GetVehicleEngineHealth(veh), GetVehicleBodyHealth(veh) end
+
+local function toGarage(plate, veh)
+    local engine, body = healthOf(veh)
+    local n = MySQL.update.await([[UPDATE mdp_vehicles SET state = ?, garage_id = ?, engine = ?, body = ?, coords = NULL, parked_at = NULL
+        WHERE plate = ? AND state IN (?, ?)]], { VS.GARAGED, Config.DefaultGarage, engine, body, plate, VS.OUT, VS.PARKED_WORLD })
+    if n == 1 then Security.UntrackSpawn(plate); DeleteEntity(veh) end
+    return n == 1
 end
 
-AddEventHandler('playerDropped', function()
-    local src = source
-    local ok, err = pcall(onDropped, src)
-    if not ok then print('^1[mdp_garages] disconnect policy failed: ' .. tostring(err) .. '^0') end
-end)
+local function applyPolicy(plate, veh, mode)
+    local c, h = GetEntityCoords(veh), GetEntityHeading(veh)
+    local engine, body = healthOf(veh)
+    if mode == 'garage' then
+        toGarage(plate, veh)
+    elseif mode == 'impound' then
+        local reason = (Config.ImpoundReasons or {})[Config.DisconnectImpoundReason] or { label = 'Abandoned', fee = 0, hours = 0 }
+        local n = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, garage_id = ?, engine = ?, body = ?, coords = NULL, parked_at = NULL WHERE plate = ? AND state = ?',
+            { VS.IMPOUNDED, Config.DefaultImpound, engine, body, plate, VS.OUT })
+        if n == 1 then
+            MySQL.insert.await([[INSERT INTO mdp_impound (plate, reason, officer, fee, release_after, location)
+                VALUES (?, ?, 'system:disconnect', ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? HOUR), ?)]],
+                { plate, reason.label, math.tointeger(reason.fee) or 0, math.tointeger(reason.hours) or 0, Config.DefaultImpound })
+            Security.UntrackSpawn(plate); DeleteEntity(veh)
+        end
+    else -- keep: parked in place, stays tracked (owner nil) until the owner reconnects (ClaimSpawn)
+        MySQL.update.await([[UPDATE mdp_vehicles SET state = ?, coords = ?, heading = ?, engine = ?, body = ?,
+            parked_at = CURRENT_TIMESTAMP WHERE plate = ? AND state = ?]],
+            { VS.PARKED_WORLD, json.encode({ x = c.x, y = c.y, z = c.z }), h, engine, body, plate, VS.OUT })
+    end
+end
+
+function Security.OnPlayerDropped(src, identifier, plates, reason)
+    if type(plates) ~= 'table' or #plates == 0 then return end
+    local ped = GetPlayerPed(src)
+    local mode = Config.OnDisconnect or 'keep'
+    for _, plate in ipairs(plates) do
+        local veh = Security.GetSpawnedEntity(plate)
+        if veh then
+            local driver = GetPedInVehicleSeat(veh, -1)
+            local wasDriving = (ped and ped ~= 0 and driver == ped) or ((not ped or ped == 0) and (driver == 0 or not driver))
+            if wasDriving then
+                local ok, err = pcall(Security.WithLock, plate, 0, applyPolicy, plate, veh, mode)
+                if not ok then print(('^1[mdp_garages] disconnect policy failed for %s: %s^0'):format(plate, tostring(err))) end
+            end
+        end
+    end
+end
+
+--- Optional (Config.Security.despawnOnDropMs): unclaimed vehicle after the timeout -> save, then garage.
+function Security.OnDroppedVehicleTimeout(plate, netId, identifier)
+    local veh = NetworkGetEntityFromNetworkId(netId)
+    if not veh or veh == 0 or not DoesEntityExist(veh) then return end
+    local ok, err = pcall(Security.WithLock, plate, 0, toGarage, plate, veh)
+    if not ok then print(('^1[mdp_garages] drop timeout failed for %s: %s^0'):format(plate, tostring(err))) end
+end

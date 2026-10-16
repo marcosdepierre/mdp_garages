@@ -145,10 +145,20 @@ exports('AddVehicle', Vehicles.AddVehicle)
 ---------------------------------------------------------------------------
 -- Sync on player load (per framework event)
 ---------------------------------------------------------------------------
+--- Reconnect: hand the player's still-tracked vehicles back to them (Security.ClaimSpawn).
+local function claimSpawns(src, ident)
+    local rows = MySQL.query.await('SELECT plate FROM mdp_vehicles WHERE owner = ? AND state IN (?, ?)',
+        { ident, VS.OUT, VS.PARKED_WORLD }) or {}
+    for _, r in ipairs(rows) do
+        if Security.GetSpawnedEntity(r.plate) then Security.ClaimSpawn(r.plate, src) end
+    end
+end
+
 local function syncPlayer(src)
-    if not Config.SyncFrameworkTables or Bridge.Framework == 'standalone' then return end
     local ident = Bridge.GetIdentifier(src)
     if not ident then return end
+    pcall(claimSpawns, src, ident)
+    if not Config.SyncFrameworkTables or Bridge.Framework == 'standalone' then return end
     local read, inserted = Vehicles.ImportFromFramework(Bridge.Framework, ident)
     if inserted > 0 then
         print(('[mdp_garages] synced %d/%d framework vehicles for %s'):format(inserted, read, ident))
