@@ -51,7 +51,7 @@ MDP.Callback('mdp_garages:getVehicles', {
 }, function(src, data)
     local garage, err = Utils.GetGarage(data.garage_id, LIST_KINDS)
     if not garage then return { ok = false, error = err } end
-    MDP.Vehicles.SyncPlayer(src) -- lazy framework sync, 60 s cache (QA N7)
+    CreateThread(function() MDP.Vehicles.SyncPlayer(src) end) -- lazy framework sync, 60 s cache, non-blocking (R3-2)
     local list = listVehicles(src, garage)
     if not list then return { ok = false, error = 'invalid_source' } end
     return { ok = true, data = list }
@@ -82,7 +82,7 @@ MDP.Callback('mdp_garages:takeOut', {
     local garage, gerr = Utils.GetGarage(data.garage_id, GARAGE_KINDS)
     if not garage then return { ok = false, error = gerr } end
     local plate = data.plate -- already normalized by ValidateSchema
-    local row = MySQL.single.await('SELECT model, vtype, props, state, garage_id FROM mdp_vehicles WHERE plate = ?', { plate })
+    local row = MySQL.single.await('SELECT model, vtype, props, state, garage_id, coords FROM mdp_vehicles WHERE plate = ?', { plate })
     if not row then return { ok = false, error = 'not_found' } end
     if tonumber(row.state) == VS.RETIRED then return { ok = false, error = 'retired' } end
     local state = tonumber(row.state)
@@ -98,6 +98,20 @@ MDP.Callback('mdp_garages:takeOut', {
         local tracked = Security.GetSpawnedEntity(plate)
         if tracked then
             if state ~= VS.PARKED_WORLD then return { ok = false, error = 'already_out' } end
+            -- R3-4: never delete a world vehicle someone is using or has moved
+            for seat = -1, (GetVehicleMaxNumberOfPassengers and GetVehicleMaxNumberOfPassengers(tracked) or 6) - 1 do
+                local ped = GetPedInVehicleSeat(tracked, seat)
+                if ped and ped ~= 0 then return { ok = false, error = 'in_use' } end
+            end
+            if row.coords then
+                local okC, c = pcall(json.decode, row.coords)
+                if okC and type(c) == 'table' and c.x then
+                    local cur = GetEntityCoords(tracked)
+                    if #(cur - vec3(c.x, c.y, c.z)) > (Config.ParkedMoveTolerance or 5.0) then
+                        return { ok = false, error = 'vehicle_moved' }
+                    end
+                end
+            end
             -- world-parked entity still alive: remove it first so only one exists
             Security.UntrackSpawn(plate)
             DeleteEntity(tracked)
@@ -180,12 +194,18 @@ MDP.Callback('mdp_garages:storeVehicle', {
     -- QA N13: player must be in the vehicle, and it must be OUR tracked entity (anti-clone)
     if GetVehiclePedIsIn(GetPlayerPed(src), false) ~= veh then return { ok = false, error = 'not_in_vehicle' } end
     local tracked = Security.GetSpawnedEntity(plate)
-    if tracked ~= veh then
-        if tracked then
-            Security.LogReject(src, 'mdp_garages:storeVehicle', 'clone_detected', { plate = plate })
-            DeleteEntity(veh) -- the clone; the tracked original stays
-        end
-        return { ok = false, error = tracked and 'clone_detected' or 'not_tracked' }
+    if tracked and tracked ~= veh then
+        -- another tracked entity has this plate: this one is a clone
+        Security.LogReject(src, 'mdp_garages:storeVehicle', 'clone_detected', { plate = plate })
+        DeleteEntity(veh) -- the clone; the tracked original stays
+        return { ok = false, error = 'clone_detected' }
+    end
+    if not tracked then
+        -- R3-1: not spawned by us (dealership, other script). Accept if DB ownership (requireOwnership above),
+        -- model hash (checked above) and state OUT match; then track it.
+        if tonumber(row.state) ~= VS.OUT then return { ok = false, error = 'not_tracked' } end
+        Security.TrackSpawn(plate, data.netId, src)
+        Entity(veh).state:set('mdp_plate', plate, true)
     end
     local vtype = resolveVehicleType(veh, row.model, data.vclass)
     if not Utils.GarageAllowsType(garage, vtype) then return { ok = false, error = 'wrong_vehicle_type' } end

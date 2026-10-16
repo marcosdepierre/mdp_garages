@@ -34,7 +34,7 @@ for _, c in ipairs({
     'already_out', 'retired', 'impounded', 'no_spawn', 'spawn_failed', 'unpaid_fines',
     'insufficient_funds', 'world_limit', 'external_invoice', 'not_ready', 'wrong_vehicle_type', 'plate_unresolved',
     'invalid_state', 'not_in_vehicle', 'clone_detected', 'not_tracked', 'invalid_source', 'already_paid',
-    'invalid_amount', 'fine_not_found', 'timeout'
+    'invalid_amount', 'fine_not_found', 'in_use', 'vehicle_moved', 'timeout'
 }) do Constants.ErrorCodes[c] = true end
 
 -- Schema version expected by this code (mdp_schema_version)

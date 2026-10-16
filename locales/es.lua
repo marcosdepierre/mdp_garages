@@ -80,5 +80,7 @@ Locales.es = {
         err_invalid_amount = 'Importe no válido',
         err_impounded = 'Este vehículo está embargado, recupéralo en el depósito',
         err_fine_not_found = 'Multa no encontrada o ya pagada',
+        err_in_use = 'Alguien está usando este vehículo',
+        err_vehicle_moved = 'Este vehículo ya no está donde se aparcó',
     },
 }

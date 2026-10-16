@@ -50,6 +50,13 @@ local function upgradeSchema()
             print(('[mdp_garages] schema upgrade: added %s.%s'):format(u[1], u[2]))
         end
     end
+    -- R3-6: UNIQUE(owner, config_id) on upgraded DBs (fill legacy '' values first so the index can be created)
+    if hasTable('mdp_private_garages') and MySQL.scalar.await([[SELECT 1 FROM information_schema.statistics
+        WHERE table_schema = DATABASE() AND table_name = 'mdp_private_garages' AND index_name = 'uq_mdp_pgarages_owner_config' LIMIT 1]]) == nil then
+        MySQL.update.await("UPDATE `mdp_private_garages` SET `config_id` = CONCAT('legacy_', `id`) WHERE `config_id` = ''")
+        MySQL.query.await('CREATE UNIQUE INDEX `uq_mdp_pgarages_owner_config` ON `mdp_private_garages` (`owner`, `config_id`)')
+        print('[mdp_garages] schema upgrade: added UNIQUE(owner, config_id) on mdp_private_garages')
+    end
     -- fines.channel ENUM on DBs that had it without needs_review
     local ctype = hasTable('mdp_fines') and MySQL.scalar.await([[SELECT COLUMN_TYPE FROM information_schema.columns
         WHERE table_schema = DATABASE() AND table_name = 'mdp_fines' AND column_name = 'channel']])
@@ -68,7 +75,10 @@ local function upgradeSchema()
 end
 
 local function onStart()
-    upgradeSchema() -- errors abort startup (MDP.Ready stays false)
+    if not hasTable('mdp_vehicles') then
+        error('table mdp_vehicles not found: run sql/install.sql on this database first', 0)
+    end
+    upgradeSchema() -- errors abort this attempt (MDP.Ready stays false)
     -- 1) Leftover entities (resource restart without server restart): persist position, remove entity.
     local cleaned = 0
     forEachOwnEntity(function(veh, plate)
@@ -110,13 +120,39 @@ local function onStart()
     CreateThread(function() MDP.Vehicles.SyncConnectedPlayers() end)
 end
 
+--- R3-5: startup recovery with retries (backoff 2 s / 5 s / 10 s), then a clear error and stay not_ready.
+--- Console command `mdp_recover` re-runs it manually after fixing the cause.
+local BACKOFF = { 2000, 5000, 10000 }
+local recovering = false
+function MDP.RunRecovery(by)
+    if recovering or MDP.Ready then return end
+    recovering = true
+    local ok, err = pcall(onStart)
+    local attempt = 0
+    while not ok and attempt < #BACKOFF do
+        attempt = attempt + 1
+        print(('^3[mdp_garages] startup recovery failed (%s), retry %d/%d in %d s: %s^0')
+            :format(by, attempt, #BACKOFF, BACKOFF[attempt] // 1000, tostring(err)))
+        Wait(BACKOFF[attempt])
+        ok, err = pcall(onStart)
+    end
+    recovering = false
+    if not ok then
+        print('^1[mdp_garages] ============================================================^0')
+        print('^1[mdp_garages] STARTUP RECOVERY FAILED: ' .. tostring(err) .. '^0')
+        print('^1[mdp_garages] All garage callbacks answer not_ready. Fix the cause (run sql/install.sql,^0')
+        print('^1[mdp_garages] check DB permissions for ALTER) and type `mdp_recover` in the console.^0')
+        print('^1[mdp_garages] ============================================================^0')
+    end
+end
+
+RegisterCommand('mdp_recover', function(src)
+    if src ~= 0 then return end -- console only
+    CreateThread(function() MDP.RunRecovery('console') end)
+end, true)
+
 CreateThread(function()
-    MySQL.ready(function()
-        local ok, err = pcall(onStart)
-        if not ok then
-            print('^1[mdp_garages] startup recovery failed, callbacks stay disabled (not_ready): ' .. tostring(err) .. '^0')
-        end
-    end)
+    MySQL.ready(function() MDP.RunRecovery('startup') end)
 end)
 
 -- On stop: persist positions of live vehicles (they stay OUT; next start converts them).
@@ -162,6 +198,23 @@ local function applyPolicy(plate, veh, mode)
     end
 end
 
+--- Runs the policy under the plate lock; if the lock is busy (e.g. a takeOut in progress) log and retry (R3-7).
+function MDP.ApplyDisconnectPolicy(plate, veh, mode, attempt)
+    local ok, r1, r2 = pcall(Security.WithLock, plate, 0, applyPolicy, plate, veh, mode)
+    if not ok then
+        print(('^1[mdp_garages] disconnect policy failed for %s: %s^0'):format(plate, tostring(r1)))
+    elseif r1 == false and r2 == 'locked' then
+        if attempt >= 5 then
+            print(('^1[mdp_garages] disconnect policy for %s gave up: plate stayed locked^0'):format(plate))
+            return
+        end
+        print(('^3[mdp_garages] disconnect policy for %s: plate locked, retry %d in 2 s^0'):format(plate, attempt))
+        SetTimeout(2000, function()
+            if DoesEntityExist(veh) then MDP.ApplyDisconnectPolicy(plate, veh, mode, attempt + 1) end
+        end)
+    end
+end
+
 function Security.OnPlayerDropped(src, identifier, plates, reason)
     if type(plates) ~= 'table' or #plates == 0 then return end
     local ped = GetPlayerPed(src)
@@ -171,10 +224,7 @@ function Security.OnPlayerDropped(src, identifier, plates, reason)
         if veh then
             local driver = GetPedInVehicleSeat(veh, -1)
             local wasDriving = (ped and ped ~= 0 and driver == ped) or ((not ped or ped == 0) and (driver == 0 or not driver))
-            if wasDriving then
-                local ok, err = pcall(Security.WithLock, plate, 0, applyPolicy, plate, veh, mode)
-                if not ok then print(('^1[mdp_garages] disconnect policy failed for %s: %s^0'):format(plate, tostring(err))) end
-            end
+            if wasDriving then MDP.ApplyDisconnectPolicy(plate, veh, mode, 1) end
         end
     end
 end

@@ -80,5 +80,7 @@ Locales.en = {
         err_invalid_amount = 'Invalid amount',
         err_impounded = 'This vehicle is impounded, release it at the impound lot',
         err_fine_not_found = 'Fine not found or already paid',
+        err_in_use = 'Someone is using this vehicle',
+        err_vehicle_moved = 'This vehicle is no longer where it was parked',
     },
 }

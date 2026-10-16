@@ -3,7 +3,8 @@
 -- Loaded after bridge/framework/*.lua. Entries live 35 s after drop (Security rate-limit carry is 30 s).
 if not Bridge.IsServer then return end
 
-local cache = {}
+local cache = {}   -- src -> identifier
+local byIdent = {} -- identifier -> src (reverse map, R3-8)
 local rawGetIdentifier = Bridge.GetIdentifier
 
 function Bridge.GetIdentifier(src)
@@ -12,6 +13,7 @@ function Bridge.GetIdentifier(src)
     local ok, id = pcall(rawGetIdentifier, src)
     if ok and type(id) == 'string' and id ~= '' then
         cache[src] = id
+        byIdent[id] = src
         return id
     end
     return cache[src]
@@ -31,6 +33,17 @@ AddEventHandler('playerDropped', function()
     local src = source
     SetTimeout(35000, function()
         -- only clear if the slot was not reused by a new player meanwhile
-        if GetPlayerName(src) == nil then cache[src] = nil end
+        if GetPlayerName(src) == nil then
+            local id = cache[src]
+            cache[src] = nil
+            if id and byIdent[id] == src then byIdent[id] = nil end
+        end
     end)
 end)
+
+--- Online source for an identifier (O(1); verified against the live player), or nil.
+function Bridge.GetSourceByIdentifier(ident)
+    local src = ident and byIdent[ident]
+    if src and GetPlayerName(src) ~= nil and cache[src] == ident then return src end
+    return nil
+end

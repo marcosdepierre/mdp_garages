@@ -44,7 +44,11 @@ function Vehicles.MapFrameworkRow(framework, r)
         if r.type ~= nil and not (mig.VehicleTypes or { car = true })[tostring(r.type)] then return nil, 'type' end
         if mig.SkipJobVehicles ~= false and r.job ~= nil and r.job ~= '' and r.job ~= 'civ' then return nil, 'job' end
         local state = VS.GARAGED
-        if r.stored ~= nil and tonumber(r.stored) == 0 and mig.NotStored == 'impounded' then state = VS.IMPOUNDED end
+        if r.stored ~= nil and tonumber(r.stored) == 0 then
+            -- not stored: 'out' (default; storable via storeVehicle, R3-1) | 'impounded' | 'garaged'
+            if mig.NotStored == 'impounded' then state = VS.IMPOUNDED
+            elseif mig.NotStored ~= 'garaged' then state = VS.OUT end
+        end
         local gid
         if r.parking and r.parking ~= '' then
             gid = (Config.ESXParkingMap or {})[tostring(r.parking)] or ('public:' .. tostring(r.parking))
@@ -55,8 +59,10 @@ function Vehicles.MapFrameworkRow(framework, r)
                  vtype = (r.type == 'boat' and 'boat') or ((r.type == 'airplane' or r.type == 'plane') and 'plane') or (r.type == 'helicopter' and 'heli') or 'automobile',
                  state = state, garage_id = gid, fuel = 100, engine = 1000, body = 1000 }
     else
-        local state = (tonumber(r.state) == 2) and VS.IMPOUNDED or VS.GARAGED
-        local gid = state == VS.GARAGED and Utils.ResolveGarageId(r.garage and ('public:' .. tostring(r.garage)) or nil, plate) or nil
+        -- QB state: 0 out (e.g. just bought, storable via storeVehicle), 1 garaged, 2 impounded
+        local qs = tonumber(r.state)
+        local state = (qs == 2 and VS.IMPOUNDED) or (qs == 0 and VS.OUT) or VS.GARAGED
+        local gid = state ~= VS.IMPOUNDED and Utils.ResolveGarageId(r.garage and ('public:' .. tostring(r.garage)) or nil, plate) or nil
         return { plate = plate, owner = r.citizenid, model = tostring(r.vehicle or 'unknown'), props = r.mods, vtype = 'automobile',
                  state = state, garage_id = gid, fuel = tonumber(r.fuel) or 100,
                  engine = tonumber(r.engine) or 1000, body = tonumber(r.body) or 1000 }
@@ -71,36 +77,45 @@ local function onOwnerChanged(plate, oldOwner, newOwner)
 end
 Vehicles.OnOwnerChanged = onOwnerChanged
 
---- Batched upsert. New plates are inserted; existing plates only get their owner updated.
---- Returns inserted count (new rows), transferred count.
+--- Diff-based apply (QA R3-2/R3-3): only NEW plates are inserted; plates whose owner differs are transferred
+--- only when the mdp row is GARAGED or PARKED_WORLD (1/2). OUT (0) / IMPOUNDED (3) are logged and retried next sync.
+--- Unchanged rows cause no writes. Returns inserted, transferred.
 function Vehicles.InsertBatch(rows)
     local inserted, transferred, size = 0, 0, (Config.Migration and Config.Migration.BatchSize) or 500
     for i = 1, #rows, size do
-        local ph, params, plates, wanted = {}, {}, {}, {}
-        for j = i, math.min(i + size - 1, #rows) do
-            local r = rows[j]
-            ph[#ph + 1] = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'framework')"
-            -- explicit indices: props/garage_id may be nil (ipairs would stop early)
-            local vals = { r.plate, r.owner, r.model, (Config.VehicleTypes or {})[r.model] or r.vtype or 'automobile',
-                           r.props, r.state, r.garage_id, r.fuel, r.engine, r.body }
-            local base = #params
-            for n = 1, 10 do params[base + n] = vals[n] end
-            plates[#plates + 1] = r.plate
-            wanted[r.plate] = r.owner
-        end
-        -- previous owners of plates that already exist
-        local qs = string.rep('?', #plates, ', ')
+        local chunk, plates = {}, {}
+        for j = i, math.min(i + size - 1, #rows) do chunk[#chunk + 1] = rows[j]; plates[#plates + 1] = rows[j].plate end
         local existing = {}
-        for _, e in ipairs(MySQL.query.await('SELECT plate, owner FROM mdp_vehicles WHERE plate IN (' .. qs .. ')', plates) or {}) do
-            existing[e.plate] = e.owner
+        local qs = string.rep('?', #plates, ', ')
+        for _, e in ipairs(MySQL.query.await('SELECT plate, owner, state FROM mdp_vehicles WHERE plate IN (' .. qs .. ')', plates) or {}) do
+            existing[e.plate] = e
         end
-        MySQL.update.await(
-            'INSERT INTO mdp_vehicles (plate, owner, model, vtype, props, state, garage_id, fuel, engine, body, source) VALUES '
-            .. table.concat(ph, ', ') .. ' ON DUPLICATE KEY UPDATE owner = VALUES(owner)', params)
-        for _, p in ipairs(plates) do
-            local old = existing[p]
-            if old == nil then inserted = inserted + 1
-            elseif old ~= wanted[p] then transferred = transferred + 1; onOwnerChanged(p, old, wanted[p]) end
+        local ph, params = {}, {}
+        for _, r in ipairs(chunk) do
+            local e = existing[r.plate]
+            if not e then
+                ph[#ph + 1] = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'framework')"
+                -- explicit indices: props/garage_id may be nil (ipairs would stop early)
+                local vals = { r.plate, r.owner, r.model, (Config.VehicleTypes or {})[r.model] or r.vtype or 'automobile',
+                               r.props, r.state, r.garage_id, r.fuel, r.engine, r.body }
+                local base = #params
+                for n = 1, 10 do params[base + n] = vals[n] end
+            elseif e.owner ~= r.owner then
+                local st = tonumber(e.state)
+                if st == VS.GARAGED or st == VS.PARKED_WORLD then
+                    local n = MySQL.update.await('UPDATE mdp_vehicles SET owner = ? WHERE plate = ? AND owner = ? AND state IN (?, ?)',
+                        { r.owner, r.plate, e.owner, VS.GARAGED, VS.PARKED_WORLD })
+                    if n == 1 then transferred = transferred + 1; onOwnerChanged(r.plate, e.owner, r.owner) end
+                else
+                    print(('^3[mdp_garages] owner change for %s (%s -> %s) deferred: vehicle is in state %s; retried next sync^0')
+                        :format(r.plate, tostring(e.owner), tostring(r.owner), tostring(st)))
+                end
+            end
+        end
+        if #ph > 0 then
+            inserted = inserted + (MySQL.update.await(
+                'INSERT IGNORE INTO mdp_vehicles (plate, owner, model, vtype, props, state, garage_id, fuel, engine, body, source) VALUES '
+                .. table.concat(ph, ', '), params) or 0)
         end
     end
     return inserted, transferred
@@ -206,16 +221,27 @@ function Vehicles.AddVehicle(owner, plate, model, props, garageId)
         else return false, 'invalid_props' end
         if #propsJson > 65535 then return false, 'invalid_props' end
     end
+    -- garageId = 'out': the vehicle is already spawned in the world (e.g. dealership test-drive/delivery)
+    local initialState = VS.GARAGED
+    if garageId == 'out' then initialState, garageId = VS.OUT, nil end
     garageId = Utils.ResolveGarageId(garageId or Config.DefaultGarage, plate)
     local vtype = (Config.VehicleTypes or {})[model] or 'automobile'
-    local okSel, old = pcall(MySQL.scalar.await, 'SELECT owner FROM mdp_vehicles WHERE plate = ?', { plate })
+    local okSel, cur = pcall(MySQL.single.await, 'SELECT owner, state FROM mdp_vehicles WHERE plate = ?', { plate })
     if not okSel then return false, 'db_error' end
-    local ok = pcall(MySQL.update.await,
-        [[INSERT INTO mdp_vehicles (plate, owner, model, vtype, props, state, garage_id, source) VALUES (?, ?, ?, ?, ?, ?, ?, 'mdp')
-          ON DUPLICATE KEY UPDATE owner = VALUES(owner)]],
-        { plate, owner, model, vtype, propsJson, VS.GARAGED, garageId })
-    if not ok then return false, 'db_error' end
-    if old and old ~= owner then onOwnerChanged(plate, old, owner) end
+    local old = cur and cur.owner
+    if not cur then
+        local ok = pcall(MySQL.update.await,
+            [[INSERT IGNORE INTO mdp_vehicles (plate, owner, model, vtype, props, state, garage_id, source)
+              VALUES (?, ?, ?, ?, ?, ?, ?, 'mdp')]], { plate, owner, model, vtype, propsJson, initialState, garageId })
+        if not ok then return false, 'db_error' end
+    elseif old ~= owner then
+        -- R3-3: transfer only when garaged / world-parked
+        local okU, n = pcall(MySQL.update.await, 'UPDATE mdp_vehicles SET owner = ? WHERE plate = ? AND owner = ? AND state IN (?, ?)',
+            { owner, plate, old, VS.GARAGED, VS.PARKED_WORLD })
+        if not okU then return false, 'db_error' end
+        if n ~= 1 then return false, 'transfer_deferred' end
+        onOwnerChanged(plate, old, owner)
+    end
     -- also sync the owner's other framework vehicles if they are online (QA N7)
     local src = Vehicles.FindSourceByIdentifier and Vehicles.FindSourceByIdentifier(owner)
     if src then CreateThread(function() Vehicles.SyncPlayer(src, true) end) end
@@ -238,6 +264,7 @@ end
 local lastSync = {} -- identifier -> GetGameTimer() of last framework sync
 
 function Vehicles.FindSourceByIdentifier(ident)
+    if Bridge.GetSourceByIdentifier then return Bridge.GetSourceByIdentifier(ident) end -- R3-8 reverse map
     for _, id in ipairs(GetPlayers()) do
         local src = tonumber(id)
         if src and Bridge.GetIdentifier(src) == ident then return src end
@@ -249,7 +276,7 @@ end
 local function syncPlayer(src, force)
     local ident = Bridge.GetIdentifier(src)
     if not ident then return end
-    pcall(claimSpawns, src, ident)
+    if force then pcall(claimSpawns, src, ident) end -- R3-2: only on load/start/AddVehicle, not on every garage open
     if not Config.SyncFrameworkTables or Bridge.Framework == 'standalone' then return end
     local now = GetGameTimer()
     if not force and lastSync[ident] and now - lastSync[ident] < 60000 then return end

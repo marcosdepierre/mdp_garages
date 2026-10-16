@@ -66,13 +66,13 @@ Config.SyncRemovals = true
 --   Ace: ace permission for in-game use · string · 'command.mdp_migrate'
 --   VehicleTypes: ESX `type` -> import? (unknown types skipped) · table · cars only
 --   SkipJobVehicles: skip rows with a non-empty ESX `job` column · boolean · true
---   NotStored: ESX stored=0 maps to · 'garaged' | 'impounded' · 'garaged'
+--   NotStored: ESX stored=0 maps to · 'out' (storable at a garage) | 'garaged' | 'impounded' · 'out'
 Config.Migration = {
     Enabled = false,
     Ace = 'command.mdp_migrate',
     VehicleTypes = { car = true, automobile = true },
     SkipJobVehicles = true,
-    NotStored = 'garaged',
+    NotStored = 'out',
     BatchSize = 500, -- rows per multi-row INSERT · integer · 500
 }
 -- ESX `parking` column value -> mdp garage id, applied by migrate/sync BEFORE Utils.ResolveGarageId.
@@ -97,6 +97,8 @@ Config.OnDisconnect = 'keep'
 -- Impound reason id (Config.ImpoundReasons) and lot used by OnDisconnect = 'impound' · string · 'abandoned' / 'impound:lspd'
 Config.DisconnectImpoundReason = 'abandoned'
 Config.DefaultImpound = 'impound:lspd'
+-- takeOut of a world-parked car (state 2) is refused if it moved more than this (m) from its stored coords · number · 5.0
+Config.ParkedMoveTolerance = 5.0
 -- Max world-parked vehicles per player; at the limit parking is refused · integer · 5
 Config.MaxWorldParkedPerPlayer = 5
 -- Max world-parked vehicles on the server; at the limit parking is refused (see AutoImpoundOldest) · integer · 150

@@ -37,14 +37,21 @@ Tables are prefixed `mdp_` so they don't clash with ESX `owned_vehicles` or QB `
 - **One-off migration:** set `Config.Migration.Enabled = true` (it runs once at start) or run `mdp_migrate` in the console. It imports only the detected framework's table, in batches, with `INSERT IGNORE`. ESX `type`, `job` and `stored` are respected (see `Config.Migration`).
 - **Dealerships** can call the export directly (below).
 
+## Recommended indexes (framework tables)
+Sync queries the framework table by owner. ESX doesn't index `owned_vehicles.owner` by default, so this is recommended (mdp_garages never alters framework tables itself):
+```sql
+ALTER TABLE owned_vehicles ADD INDEX idx_owner (owner);
+```
+
 ## Exports (server)
 ```lua
 -- returns ok:boolean, info?:string ('exists' | 'transferred') or err
 local ok, info = exports.mdp_garages:AddVehicle(owner, plate, model, props, garageId)
 -- owner: ESX identifier / QB citizenid · plate: 1-8 chars [A-Z0-9 ] · model: spawn name
--- props: table or JSON (optional) · garageId: 'public:<id>' (optional, defaults to Config.DefaultGarage)
+-- props: table or JSON (optional) · garageId: 'public:<id>' (optional, defaults to Config.DefaultGarage),
+--   or 'out' if the vehicle is already spawned (it can then be stored at any garage)
 -- model: name or numeric hash. Existing plate with another owner = ownership transfer (previous keys revoked)
--- errors: invalid_owner, invalid_plate, invalid_model, invalid_props, db_error
+-- errors: invalid_owner, invalid_plate, invalid_model, invalid_props, transfer_deferred (vehicle out/impounded), db_error
 ```
 ## Exports (client)
 `OpenGarageUI(view, data)`, `UpdateGarageUI(data, view?)`, `CloseGarageUI()`.
@@ -53,6 +60,7 @@ local ok, info = exports.mdp_garages:AddVehicle(owner, plate, model, props, gara
 | Command | Who | Description |
 |---|---|---|
 | `mdp_migrate` | console, or ace `command.mdp_migrate` (`add_ace group.admin command.mdp_migrate allow`) | import from the framework vehicle table |
+| `mdp_recover` | console | re-run startup recovery after fixing a DB problem (the resource answers `not_ready` until it succeeds) |
 | `/mdp_finereview <id> paid\|void` | ace `mdp_garages.admin` | resolve `needs_review` fines (Integrations) |
 | `/mdp_payfine <id>` | players | pay a fine from the bank. Refused if the fine was sent as an invoice through a billing resource |
 
@@ -80,6 +88,7 @@ Every key is commented in the file as description · values · default. Summary:
 | `DisconnectImpoundReason` / `DefaultImpound` | `'abandoned'` / `'impound:lspd'` | used by OnDisconnect = impound |
 | `ESXParkingMap` | examples | ESX `parking` value → garage id (migration/sync) |
 | `VehicleTypes` | `{}` | per-model type override (`automobile/bike/boat/heli/plane`) |
+| `ParkedMoveTolerance` | `5.0` | takeOut of a world-parked car is refused if it moved further than this |
 | `MaxWorldParkedPerPlayer` / `MaxWorldParkedServer` | `5` / `150` | parking is refused at the limit |
 | `AutoImpoundOldest` | `false` | impound the oldest car at the global limit instead |
 | `WorldSpawnRadius` / `DespawnMargin` | `150.0` / `50.0` | proximity spawn with hysteresis |
