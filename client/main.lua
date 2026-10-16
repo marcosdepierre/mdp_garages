@@ -79,7 +79,8 @@ RegisterNUICallback('takeOut', function(req, cb)
         return cb({ ok = false, error = 'invalid_request' })
     end
     local res = serverCall('mdp_garages:takeOut', { plate = plate, garage_id = req.garage_id })
-    if res.ok then UI.Close() end
+    -- F1: never skip cb (the NUI keeps its take-out lock until it answers or fetchNui times out)
+    if res.ok then local okc, e = pcall(UI.Close); if not okc then print('^1[mdp_garages] UI.Close error:^7 ' .. tostring(e)) end end
     cb(res)
 end)
 
