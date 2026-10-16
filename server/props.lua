@@ -78,9 +78,9 @@ end
 --- Hand props to the entity owner: Integrations' Bridge.Props.RequestApply (confirm/timeout), else 'mdp:props' bag.
 function MDP.Props.RequestApply(veh, propsJson)
     if Bridge.Props and type(Bridge.Props.RequestApply) == 'function' then
-        local ok, err = pcall(Bridge.Props.RequestApply, veh, propsJson)
-        if ok then return end
-        print('^3[mdp_garages] Bridge.Props.RequestApply failed: ' .. tostring(err) .. ' (state bag fallback)^0')
+        local ok, armed = pcall(Bridge.Props.RequestApply, veh, propsJson)
+        if ok and armed ~= false then return end
+        print('^3[mdp_garages] Bridge.Props.RequestApply failed: ' .. tostring(armed) .. ' (state bag fallback)^0')
     end
     Entity(veh).state:set('mdp:props', propsJson, true)
 end
@@ -92,17 +92,18 @@ local function doSpawn(row, x, y, z, heading)
     while (not veh or veh == 0 or not DoesEntityExist(veh)) and GetGameTimer() < t do Wait(50) end
     if not veh or veh == 0 or not DoesEntityExist(veh) then return nil end
     SetVehicleNumberPlateText(veh, row.plate)
-    -- one props payload: ox_lib props from DB + fuel/health from DB columns (applied by the entity owner)
-    local props = MDP.Props.Decode(row.props) or {}
-    props.plate = row.plate
-    props.fuelLevel = clampFuel(row.fuel)
-    props.engineHealth = MDP.Props.Health('engine', row.engine)
-    props.bodyHealth = MDP.Props.Health('body', row.body)
+    -- payload envelope agreed with Integrations (bridge/vehicle/props.lua): props from DB, fuel/health from DB columns
+    local props = MDP.Props.Decode(row.props)
+    if props then props.plate = row.plate end
+    local fuel = clampFuel(row.fuel)
     local bag = Entity(veh).state
     bag:set('mdp_plate', row.plate, true)
     bag:set('mdp_mileage', tonumber(row.mileage) or 0.0, true) -- km, odometer base for the driver
-    if MDP.Props.FuelServerCapable() then bag:set('fuel', props.fuelLevel, true) end
-    MDP.Props.RequestApply(veh, json.encode(props))
+    if MDP.Props.FuelServerCapable() then bag:set('fuel', fuel, true) end
+    MDP.Props.RequestApply(veh, json.encode({
+        props = props, engine = MDP.Props.Health('engine', row.engine), body = MDP.Props.Health('body', row.body),
+        fuel = fuel, fuelOnClient = not MDP.Props.FuelServerCapable(), mileage = tonumber(row.mileage) or 0.0,
+    }))
     return veh
 end
 
