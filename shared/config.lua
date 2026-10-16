@@ -98,13 +98,13 @@ Config.OnDisconnect = 'keep'
 -- Impound reason id (Config.ImpoundReasons) and lot used by OnDisconnect = 'impound' · string · 'abandoned' / 'impound:lspd'
 Config.DisconnectImpoundReason = 'abandoned'
 Config.DefaultImpound = 'impound:lspd'
--- takeOut of a world-parked car (state 2) is refused if it moved more than this (m) from its stored coords · number · 5.0
 -- Phase 1 streamer: tick interval (ms) over player coords, and full registry refresh from DB (ms). Defaults 1500 / 30000.
 Config.StreamerTickMs = 1500
 Config.StreamerRefreshMs = 30000
 -- Max km accepted per store over the DB odometer (anti-tamper; mileage never decreases). Default 300.
 Config.MaxMileageDeltaKm = 300
 
+-- takeOut of a world-parked car (state 2) is refused if it moved more than this (m) from its stored coords · number · 5.0
 Config.ParkedMoveTolerance = 5.0
 -- Max world-parked vehicles per player; at the limit parking is refused · integer · 5
 Config.MaxWorldParkedPerPlayer = 5

@@ -38,3 +38,22 @@ CreateThread(function()
         end
     end
 end)
+
+--- /mdp_park: park the vehicle you just left where it stands (must be out of it, within 5 m, owner/key holder).
+RegisterCommand('mdp_park', function()
+    local ped = PlayerPedId()
+    if IsPedInAnyVehicle(ped, false) then return Bridge.Notify(Utils.ErrorText('occupied'), 'error') end
+    local veh = GetVehiclePedIsIn(ped, true) -- last vehicle
+    if veh == 0 or not DoesEntityExist(veh) then return Bridge.Notify(Utils.ErrorText('not_found'), 'error') end
+    local plate = Utils.NormalizePlate(GetVehicleNumberPlateText(veh))
+    local fuel = (Bridge.Fuel and Bridge.Fuel.Call) and Bridge.Fuel.Call('GetFuel', nil, veh) or GetVehicleFuelLevel(veh)
+    local ok, res = pcall(lib.callback.await, 'mdp_garages:parkWorld', false, {
+        netId = NetworkGetNetworkIdFromEntity(veh), vclass = GetVehicleClass(veh),
+        props = lib.getVehicleProperties(veh), fuel = tonumber(fuel), mileage = MDPClientMileage(plate),
+    })
+    if ok and type(res) == 'table' and res.ok then
+        Bridge.Notify(_L('vehicle_parked'), 'success')
+    elseif not (ok and type(res) == 'table' and res.error == 'world_limit') then -- world_limit already notified by server
+        Bridge.Notify(Utils.ErrorText(Utils.ErrorCode(ok and type(res) == 'table' and res.error or 'server_error')), 'error')
+    end
+end, false)

@@ -358,6 +358,12 @@ Rule: no client→server **event** may change state or money.
 5. `Config.OkokTrustServerEvent` needs verifying against a real okokBilling install.
 
 
+## Phase 1 contract
+- `mdp_garages:storeVehicle` (C→S lib.callback): `{garage_id, netId, props?, vclass?, fuel?, mileage?}`; **no plate** (resolved server-side) → `{ok, error?}`.
+- `mdp_garages:parkWorld` (C→S lib.callback, client `/mdp_park`): `{netId, props?, vclass?, fuel?, mileage?}`, no plate. RATE 1/s, `resolvePlate`, `requireOwnership`, vehicle empty and player within `MaxVehicleDistance`, state must be 0, model = DB, anti-clone, limits (`world_limit`, notified; `AutoImpoundOldest` frees the oldest state-2 car for the global limit only), props via `SanitizeProps`, fuel/mileage rules as store. Inside `WithLock`: `UPDATE … state=2, coords, heading, health, parked_at WHERE state=0`, doors locked, handed to the streamer.
+- `mdp_garages:takeOut`: unchanged payload; keys given after the entity exists.
+- State bag `mdp_props`: `{props, fuel, engine, body}` plus `fuelOnClient`, `mileage`.
+
 ## Phase 1: props, spawn and parked streamer
 **State bag `mdp_props`** (set by the server on every spawn, replicated): `{ props: table|nil, engine: number, body: number, fuel: number, fuelOnClient: boolean, mileage: number (km) }`. `client/props.lua` applies it only on the **network owner** of the entity, retrying `NetworkRequestControlOfEntity` until control (max 10 s): `lib.setVehicleProperties`, engine/body health, and fuel via `Bridge.Fuel.Call('SetFuel')` when `fuelOnClient` (LegacyFuel/cdn-fuel/native). ox_fuel is set server-side (`Bridge.Fuel.SetFuel`). Limitation: if the owner changes before applying, the new owner does not re-apply (open question).
 

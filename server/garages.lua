@@ -241,3 +241,89 @@ MDP.Callback('mdp_garages:storeVehicle', {
     if res[1] == false then return { ok = false, error = res[2] or 'locked' } end
     return res[1]
 end)
+
+---------------------------------------------------------------------------
+-- parkWorld (phase 1): park the vehicle where it stands (state 0 -> 2). The player must have just left it:
+-- vehicle empty, player within MaxVehicleDistance. Plate resolved server-side; props/fuel/mileage as storeVehicle.
+---------------------------------------------------------------------------
+MDP.Callback('mdp_garages:parkWorld', {
+    rateLimit = { max = 1, windowMs = 1000 },
+    schema = {
+        netId = Security.Int(1, 65535), vclass = Security.Optional(Security.Int(0, 22)),
+        props = Security.Optional(function(v) return type(v) == 'table' end),
+        fuel = Security.Optional(function(v) return type(v) == 'number' and v == v end),
+        mileage = Security.Optional(function(v) return type(v) == 'number' and v == v and v >= 0 end),
+    },
+    resolvePlate = MDP.Vehicles.ResolvePlateFromNetId,
+    requireOwnership = true,
+}, function(src, data)
+    local plate = data._plate
+    local _, _, veh = Security.PlateFromNetId(data.netId)
+    if not veh then return { ok = false, error = 'invalid_request' } end
+    if not Security.IsNear(src, GetEntityCoords(veh), Config.MaxVehicleDistance) then return { ok = false, error = 'too_far' } end
+    if not Utils.IsVehicleEmpty(veh) then return { ok = false, error = 'occupied' } end
+    local row = MySQL.single.await('SELECT plate, owner, model, state, fuel, mileage FROM mdp_vehicles WHERE plate = ?', { plate })
+    if not row or tonumber(row.state) == VS.REMOVED then return { ok = false, error = 'not_found' } end
+    if tonumber(row.state) ~= VS.OUT then return { ok = false, error = 'invalid_state' } end
+    if GetEntityModel(veh) ~= Utils.ModelHash(row.model) then return { ok = false, error = 'invalid_request' } end
+    local tracked = Security.GetSpawnedEntity(plate)
+    if tracked and tracked ~= veh then
+        Security.LogReject(src, 'mdp_garages:parkWorld', 'clone_detected', { plate = plate })
+        DeleteEntity(veh)
+        return { ok = false, error = 'clone_detected' }
+    end
+    -- limits (owner of the vehicle, then server-wide)
+    local mine = MySQL.scalar.await('SELECT COUNT(*) FROM mdp_vehicles WHERE owner = ? AND state = ?', { row.owner, VS.PARKED_WORLD }) or 0
+    if mine >= (Config.MaxWorldParkedPerPlayer or 5) then
+        Bridge.Notify(src, _L('world_limit_player', Config.MaxWorldParkedPerPlayer or 5), 'error')
+        return { ok = false, error = 'world_limit' }
+    end
+    local all = MySQL.scalar.await('SELECT COUNT(*) FROM mdp_vehicles WHERE state = ?', { VS.PARKED_WORLD }) or 0
+    if all >= (Config.MaxWorldParkedServer or 150) then
+        local freed = false
+        if Config.AutoImpoundOldest then
+            local old = MySQL.single.await('SELECT plate FROM mdp_vehicles WHERE state = ? ORDER BY parked_at ASC LIMIT 1', { VS.PARKED_WORLD })
+            if old then
+                freed = Security.WithLock(old.plate, 0, function()
+                    local oldEnt = Security.GetSpawnedEntity(old.plate)
+                    if oldEnt and not Utils.IsVehicleEmpty(oldEnt) then return false end
+                    local n = MySQL.update.await('UPDATE mdp_vehicles SET state = ?, garage_id = ? WHERE plate = ? AND state = ?',
+                        { VS.IMPOUNDED, Config.DefaultImpound, old.plate, VS.PARKED_WORLD })
+                    if n ~= 1 then return false end
+                    local reason = (Config.ImpoundReasons or {}).abandoned or { label = 'Abandoned vehicle', fee = 0, hours = 0 }
+                    MySQL.insert.await([[INSERT INTO mdp_impound (plate, reason, officer, fee, release_after, location)
+                        VALUES (?, ?, 'system:world_limit', ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? HOUR), ?)]],
+                        { old.plate, reason.label, math.tointeger(reason.fee) or 0, math.tointeger(reason.hours) or 0, Config.DefaultImpound })
+                    if oldEnt then Security.UntrackSpawn(old.plate); DeleteEntity(oldEnt) end
+                    MDP.Streamer.Forget(old.plate)
+                    return true
+                end) == true
+            end
+        end
+        if not freed then
+            Bridge.Notify(src, _L('world_limit_server'), 'error')
+            return { ok = false, error = 'world_limit' }
+        end
+    end
+    local props, perr = MDP.Props.Sanitize(data.props, row, GetEntityModel(veh))
+    if perr then return { ok = false, error = 'invalid_props' } end
+    local fuel = MDP.Props.ResolveFuel(veh, data.fuel, row.fuel)
+    local mileage = MDP.Props.ResolveMileage(data.mileage, row.mileage)
+    local c, h = GetEntityCoords(veh), GetEntityHeading(veh)
+    local res = table.pack(Security.WithLock(plate, src, function()
+        local n = MySQL.update.await([[UPDATE mdp_vehicles SET state = ?, coords = ?, heading = ?, engine = ?, body = ?, fuel = ?,
+            mileage = ?, props = COALESCE(?, props), parked_at = CURRENT_TIMESTAMP WHERE plate = ? AND state = ?]],
+            { VS.PARKED_WORLD, json.encode({ x = c.x, y = c.y, z = c.z }), h, GetVehicleEngineHealth(veh), GetVehicleBodyHealth(veh),
+              fuel, mileage, props and json.encode(props) or nil, plate, VS.OUT })
+        if n ~= 1 then return { ok = false, error = 'invalid_state' } end
+        if not tracked then
+            Security.TrackSpawn(plate, math.tointeger(data.netId), src)
+            Entity(veh).state:set('mdp_plate', plate, true)
+        end
+        SetVehicleDoorsLocked(veh, 2)
+        MDP.Streamer.Track(plate) -- the streamer now owns it (despawns when nobody is near)
+        return { ok = true }
+    end))
+    if res[1] == false then return { ok = false, error = res[2] or 'locked' } end
+    return res[1]
+end)
