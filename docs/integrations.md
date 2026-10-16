@@ -383,3 +383,129 @@ Este es el **único applier**: el de `client/props.lua` (Backend) se elimina. El
 
 ### Pendiente
 - **jaksam vehicles_keys:** no hay API de servidor verificada (solo el evento de cliente `vehicles_keys:selfGiveVehicleKeys`). Se implementará cuando haya docs o código de exports de servidor.
+
+---
+
+## Concesionarios
+
+mdp_garages solo deja guardar o aparcar vehículos **marcados por el servidor** (`Security.MarkServerEntity`). Si un concesionario hace el spawn por su cuenta, ese coche no se puede guardar. Hay tres formas de integrarlo, de más a menos recomendada.
+
+### Exports de mdp (servidor)
+| Export | Firma | Retorno | Estado |
+|---|---|---|---|
+| `AddVehicle` | `exports.mdp_garages:AddVehicle(owner, plate, model, props?, garageId?)`. `owner` = identificador del framework (citizenid en qb/qbx, `xPlayer.getIdentifier()` en ESX). `garageId = 'out'` crea la fila en OUT; cualquier otro garaje, en GARAGED; `nil`, en el garaje por defecto | `ok:boolean, err?` (`invalid_owner`, `invalid_plate`, `invalid_model`, `invalid_props`, `plate_exists`, `db_error`) | ✅ `server/vehicles.lua:245-308` |
+| `SpawnOwnedVehicle` | `exports.mdp_garages:SpawnOwnedVehicle(plate, coords vector4, src)` | `netId` o `nil, err` (`invalid_plate`, `invalid_coords`, `invalid_source`, `rate_limited` (3 cada 10 s), `not_ready`, `not_owned_vehicle`, `not_owner`, `invalid_state`, `already_out`, `spawn_failed`, `locked`) | ✅ `server/garages.lua:421-478` (commit 53c2c56) |
+| `RegisterExternalVehicle` | `exports.mdp_garages:RegisterExternalVehicle(netId, plate, src?)` | `ok, err?`, según la implementación de Backend | ⚠️ Aprobado, pero el export todavía no está en el repo. Hoy solo existe `Security.RegisterExternalVehicle` (`server/security.lua:680-712`), con los errores `invalid_request`, `invalid_entity`, `plate_mismatch`, `already_marked`, `tracked_other_plate`, `already_tracked`, `not_found`, `wrong_state`, `model_mismatch` |
+
+`SpawnOwnedVehicle` sigue el mismo flujo que sacar un vehículo del garaje:
+- bloquea la matrícula, relee la fila y comprueba que `owner` sea el identificador de `src`;
+- el estado tiene que ser GARAGED, u OUT sin entidad;
+- marca la entidad en el servidor, la registra (`TrackSpawn`), pide aplicar las props (`Bridge.Props.RequestApply`) y fija el combustible;
+- da las llaves (`Bridge.Keys.GiveKeys`), sincroniza con la tabla del framework (`FrameworkSync.OnSpawn`) y deshace el cambio de estado si algo falla.
+
+### 1) Recomendado: `AddVehicle` + `SpawnOwnedVehicle`
+El concesionario mantiene **su INSERT en la tabla del framework** (para que otros recursos lo vean) y además:
+1. llama a `AddVehicle(owner, plate, model, nil, 'out')`, porque `SpawnOwnedVehicle` exige la fila en `mdp_vehicles` y no hay que esperar al import de la siguiente carga del jugador;
+2. **sustituye su spawn** por `SpawnOwnedVehicle`. Las llaves, las props y el combustible los gestiona mdp.
+
+### 2) Alternativa sin spawn: entrega en garaje
+`AddVehicle(owner, plate, model, props, '<garageId>')` deja el coche en GARAGED en ese garaje, y el jugador lo saca desde la NUI. Basta con quitar el spawn del concesionario.
+
+### 3) Secundario: `RegisterExternalVehicle` (concesionarios que hacen el spawn ellos mismos)
+Aprobado por Security, con estas condiciones (según la implementación de Backend):
+- el recurso que llama está en `Config.TrustedResources` (se comprueba con `GetInvokingResource()`); la lista está vacía por defecto;
+- la matrícula y el modelo coinciden con `mdp_vehicles`;
+- la fila se creó hace menos de 60 s;
+- el estado es OUT y no hay entidad;
+- la entidad no está ya marcada.
+
+```lua
+-- shared/config.lua (dueño del servidor): nombre exacto del recurso del concesionario
+Config.TrustedResources = { 'qbx_vehicleshop' }
+```
+Llamada justo después del INSERT y del spawn propios del concesionario:
+```lua
+local ok, err = exports.mdp_garages:AddVehicle(citizenid, plate, model, nil, 'out')
+-- ... spawn propio del concesionario -> netId ...
+local okR, errR = exports.mdp_garages:RegisterExternalVehicle(netId, plate, src)
+if not okR then print(('[shop] mdp RegisterExternalVehicle %s: %s'):format(plate, tostring(errR))) end
+```
+Con esta opción, el concesionario da las llaves y aplica las props por su cuenta.
+
+---
+
+### qbx_vehicleshop (Qbox): puntos de enganche ✅
+Fuente: https://github.com/Qbox-project/qbx_vehicleshop
+- `server/main.lua:164-199`, evento `qbx_vehicleshop:server:buyShowroomVehicle`: cobra, inserta con `exports.qbx_vehicles:CreatePlayerVehicle({ model, citizenid })` (l.188) y llama a `SpawnVehicle(src, { coords, vehicleId })` (l.195).
+- `server/main.lua:226-265`, `sellShowroomVehicle`: lo mismo para la venta a otro jugador (`CreatePlayerVehicle` en l.256 y `SpawnVehicle(playerId, …)` en l.261). Los otros flujos que llaman a `SpawnVehicle` (financiación, etc.) siguen el mismo patrón.
+- `server/utils.lua:99-124`, `function SpawnVehicle(src, data)`: lee el vehículo con `exports.qbx_vehicles:GetPlayerVehicle(vehicleId)` y hace el spawn con `qbx.spawnVehicle`, `Entity.state.vehicleid` y `config.giveKeys` (`config/server.lua:15`, `exports.qbx_vehiclekeys:GiveKeys(src, vehicle)`). **Es el único sitio que hay que cambiar** para cubrir todos los flujos.
+
+Sustitución recomendada del cuerpo de `SpawnVehicle` (`server/utils.lua`):
+```lua
+function SpawnVehicle(src, data)
+    local coords, vehicleId = data.coords, data.vehicleId
+    local newVehicle = vehicleId and exports.qbx_vehicles:GetPlayerVehicle(vehicleId) or data
+    if not newVehicle then return end
+    local plate = newVehicle.plate or newVehicle.props.plate
+    local citizenid = newVehicle.citizenid or exports.qbx_core:GetPlayer(src).PlayerData.citizenid
+
+    local ok, err = exports.mdp_garages:AddVehicle(citizenid, plate, newVehicle.modelName, nil, 'out')
+    if not ok and err ~= 'plate_exists' then
+        lib.print.error(('mdp AddVehicle %s: %s'):format(plate, err)) return
+    end
+    local netId, spawnErr = exports.mdp_garages:SpawnOwnedVehicle(plate, coords, src) -- keys/props/fuel by mdp
+    if not netId then lib.print.error(('mdp SpawnOwnedVehicle %s: %s'):format(plate, spawnErr)) return end
+
+    local vehicle = NetworkGetEntityFromNetworkId(netId)
+    if vehicleId then Entity(vehicle).state:set('vehicleid', vehicleId, false) end
+    TaskWarpPedIntoVehicle(GetPlayerPed(src), vehicle, -1)
+    return netId
+end
+```
+⚠️ Sin confirmar: que `GetPlayerVehicle` devuelva `citizenid` y `modelName` en la versión instalada (`modelName` sí se usa en l.107 del original; `citizenid` sale de la consulta de `getPlayerVehiclesInternal` en qbx_vehicles). `coords` es el `vector4` de `GetClearSpawnArea`. El test drive (l.67) **no** debe pasar por mdp: no es un vehículo en propiedad.
+
+### qb-vehicleshop (QBCore): puntos de enganche ✅
+Fuente: https://github.com/qbcore-framework/qb-vehicleshop
+- `server.lua:294-334`, `qb-vehicleshop:server:buyShowroomVehicle`: `INSERT INTO player_vehicles (…, garage, state)` con `'pillboxgarage', 0` (l.304 y l.319) y después `TriggerClientEvent('qb-vehicleshop:client:buyShowroomVehicle', src, vehicle, plate)` (l.315 y l.330).
+- Mismo patrón en `financeVehicle` (l.339-395, insert en l.356/375 y evento en l.371/390) y en `sellShowroomVehicle` (l.399-430, insert en l.418 y evento en l.428).
+- `client.lua:842-855`: el cliente pide `qb-vehicleshop:server:spawnvehicle` (`server.lua:46-70`, `CreateVehicleServerSetter`), aplica las props, `LegacyFuel` y `vehiclekeys:client:SetOwner`, y mete al jugador en el coche.
+
+Sustitución en el servidor, en cada una de las 6 líneas `TriggerClientEvent('qb-vehicleshop:client:buyShowroomVehicle', …)` (`target`/`playerid` en la venta):
+```lua
+local function mdpDeliver(src, citizenid, vehicle, plate, coords)
+    local ok, err = exports.mdp_garages:AddVehicle(citizenid, plate, vehicle, nil, 'out')
+    if not ok and err ~= 'plate_exists' then print(('[qb-vehicleshop] mdp AddVehicle %s: %s'):format(plate, err)) return end
+    local netId, e = exports.mdp_garages:SpawnOwnedVehicle(plate, coords, src)
+    if not netId then print(('[qb-vehicleshop] mdp SpawnOwnedVehicle %s: %s'):format(plate, e)) return end
+    TaskWarpPedIntoVehicle(GetPlayerPed(src), NetworkGetEntityFromNetworkId(netId), -1)
+end
+-- en lugar de: TriggerClientEvent('qb-vehicleshop:client:buyShowroomVehicle', src, vehicle, plate)
+mdpDeliver(src, cid, vehicle, plate, Config.Shops[GetShopForPlayer(src)].VehicleSpawn)
+```
+⚠️ Sin confirmar: el servidor original no sabe en qué tienda está el jugador (`tempShop`/`insideShop` son variables de cliente, `client.lua:843`), así que `GetShopForPlayer` **no existe** y hay que resolverlo (p. ej. pasando la tienda desde el cliente y validándola por distancia), o usar la alternativa 2 (`AddVehicle(cid, plate, vehicle, nil, 'pillboxgarage')`) y quitar el `TriggerClientEvent`. El `INSERT` original es asíncrono (`MySQL.insert` sin await), pero eso no afecta a mdp.
+
+### esx_vehicleshop (ESX Legacy): puntos de enganche ✅
+Fuente: https://github.com/esx-framework/ESX-Legacy-Addons/tree/main/%5Besx_addons%5D/esx_vehicleshop
+- `server/main.lua:371-405`, callback `esx_vehicleshop:buyVehicle`: `INSERT INTO owned_vehicles (owner, plate, vehicle)` (l.386) y, dentro del callback del insert, `ESX.OneSync.SpawnVehicle(joaat(model), Config.Zones.ShopOutside.Pos, Config.Zones.ShopOutside.Heading, { plate = plate }, …)` (l.396) + `TaskWarpPedIntoVehicle`.
+- `server/main.lua:180-215`, evento `esx_vehicleshop:setVehicleOwnedPlayerId` (venta del concesionario de trabajo): INSERT desde `cardealer_vehicles` (l.212). En este flujo no hay spawn en el servidor, así que conviene usar la alternativa 2 (`AddVehicle(xTarget.getIdentifier(), plate, model, props, '<garageId>')`).
+
+Sustitución del bloque `ESX.OneSync.SpawnVehicle(...)` (l.396-403):
+```lua
+local okA, errA = exports.mdp_garages:AddVehicle(xPlayer.getIdentifier(), plate, model, nil, 'out')
+if okA or errA == 'plate_exists' then
+    local pos = Config.Zones.ShopOutside.Pos
+    local netId, err = exports.mdp_garages:SpawnOwnedVehicle(plate, vector4(pos.x, pos.y, pos.z, Config.Zones.ShopOutside.Heading), source)
+    if netId then
+        Wait(300)
+        TaskWarpPedIntoVehicle(GetPlayerPed(source), NetworkGetEntityFromNetworkId(netId), -1)
+    else
+        print(('[esx_vehicleshop] mdp SpawnOwnedVehicle %s: %s'):format(plate, tostring(err)))
+    end
+else
+    print(('[esx_vehicleshop] mdp AddVehicle %s: %s'):format(plate, tostring(errA)))
+end
+```
+`model` es el string del modelo que recibe el callback y `plate` lo genera el servidor (`generateServerPlate`, l.376), así que es fiable.
+
+### Otros concesionarios
+- **jg-dealerships**, **okokVehicleShop**: son de pago o escrow. No he verificado públicamente sus puntos de enganche (archivo/función de compra y spawn). ⚠️ Pendiente. Si exponen un hook de "vehículo comprado" en el servidor, aplica el patrón 1 (`AddVehicle` + `SpawnOwnedVehicle`). Si solo hacen el spawn ellos mismos, el patrón 3 (`RegisterExternalVehicle` + `Config.TrustedResources`).
