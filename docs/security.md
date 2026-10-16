@@ -59,6 +59,7 @@ Argumentos posicionales: `opts.args = {'plate','garageId'}` los convierte en tab
    Envolver en `Security.WithLock(plate, src, fn, ...)` (libera el lock aunque `fn` falle).
 3. **Comprobar entidad existente** antes de spawnear: `Security.GetSpawnedEntity(plate)`; si existe, no crear otra.
 4. **Spawn en servidor** con `CreateVehicleServerSetter` cuando sea posible (no spawn en cliente); registrar con `Security.TrackSpawn(plate, netId, src)` (devuelve `false` si plate/netId inválidos) y `Untrack` al guardar/borrar.
+4b. **Origen de la entidad:** marcar cada vehículo creado por el servidor con `Security.MarkServerEntity(veh, plate)`. Adoptar solo si `Security.CanAdopt(ent, plate, dbCoords, modelHash)` (entidad del servidor, mismo modelo, vacía, cerca de las coords de BD). **Nunca** usar `mdp_plate` ni otra state bag replicada como prueba: el cliente dueño puede escribirlas. Tampoco `NetworkGetFirstEntityOwner` (devuelve -1 también si el primer dueño se desconectó). Configurar `set mdp_garages_entity_secret "<aleatorio largo>"` en server.cfg y, si es posible, `sv_entityLockdown` y `sv_filterRequestControl`.
 5. Si el spawn falla tras el UPDATE, **revertir** el estado (y el cobro) en servidor.
 6. Orden: validar → lock → cobrar → UPDATE condicional → spawn → track → unlock.
 

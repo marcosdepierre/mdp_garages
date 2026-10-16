@@ -491,6 +491,110 @@ function Security.SanitizeProps(props, dbRow, entity, elapsedSec)
 end
 
 ---------------------------------------------------------------------------
+-- Entidades creadas por el servidor (criterio de adopción N1)
+---------------------------------------------------------------------------
+-- Por defecto el cliente dueño de red PUEDE escribir state bags replicadas de la entidad
+-- (salvo sv_stateBagStrictMode true), así que una etiqueta pública como 'mdp_plate' es falsificable.
+-- NetworkGetFirstEntityOwner devuelve -1 también si el primer dueño se desconectó: tampoco sirve.
+-- Criterio: (1) en esta ejecución, el handle está en serverEnts (lo creó SpawnVehicle);
+-- (2) tras reiniciar el recurso, la entidad lleva 'mdp_srv' (state bag NO replicada, escrita por el
+-- servidor) igual a joaat(secret .. ':' .. plate). El secreto nunca sale del servidor
+-- (convar mdp_garages_entity_secret o KVP del recurso), así que un cliente no puede calcular la etiqueta.
+local serverEnts = {} ---@type table<integer, string>  handle -> plate
+local SRV_KEY = 'mdp_srv'
+local entitySecret
+
+local function getSecret()
+    if entitySecret then return entitySecret end
+    local s = GetConvar and GetConvar('mdp_garages_entity_secret', '') or ''
+    if s == '' and GetResourceKvpString then
+        s = GetResourceKvpString('mdp:entity_secret') or ''
+        if s == '' then
+            -- Lua no tiene RNG criptográfico: mezclar math.random (semilla 5.4 por defecto) con direcciones
+            -- de tablas (ASLR), os.clock y memoria. Se genera UNA vez y queda en KVP. Recomendado: convar.
+            local parts = {}
+            for i = 1, 4 do
+                local addr = tostring({}):match('0x(%x+)') or '0'
+                parts[i] = ('%08x%s'):format(math.random(0, 0x7FFFFFFF), addr)
+            end
+            s = table.concat(parts) .. ('%x%x'):format(os.time(), math.floor(os.clock() * 1e6 + collectgarbage('count') * 1024))
+            if SetResourceKvp then SetResourceKvp('mdp:entity_secret', s) end
+        end
+    end
+    if s == '' then s = ('%08x%08x'):format(math.random(0, 0x7FFFFFFF), math.random(0, 0x7FFFFFFF)) end -- solo en memoria
+    entitySecret = s
+    return s
+end
+
+local function entityTag(plate) return joaat(getSecret() .. ':' .. plate) end
+-- Generar el secreto al cargar (antes de que otro archivo reinicie math.randomseed con una semilla predecible).
+pcall(getSecret)
+
+--- Marca una entidad como creada por el servidor. Llamar SOLO en la ruta de spawn del servidor
+--- (MDP.Props.SpawnVehicle), nunca al adoptar ni al trackear vehículos ajenos.
+---@param ent integer
+---@param plate string
+---@return boolean
+function Security.MarkServerEntity(ent, plate)
+    plate = V.normalizePlate(plate)
+    if not plate or not ent or ent == 0 or not DoesEntityExist(ent) then return false end
+    serverEnts[ent] = plate
+    Entity(ent).state:set(SRV_KEY, entityTag(plate), false) -- false = no se replica a clientes
+    return true
+end
+
+--- ¿La creó el servidor para esta matrícula? (memoria de esta ejecución o etiqueta secreta tras reinicio)
+---@param ent integer
+---@param plate string
+---@return boolean
+function Security.IsServerEntity(ent, plate)
+    plate = V.normalizePlate(plate)
+    if not plate or not ent or ent == 0 or not DoesEntityExist(ent) then
+        if ent then serverEnts[ent] = nil end
+        return false
+    end
+    if serverEnts[ent] ~= nil then return serverEnts[ent] == plate end
+    local v = Entity(ent).state[SRV_KEY]
+    if v ~= nil and v == entityTag(plate) then
+        serverEnts[ent] = plate
+        return true
+    end
+    return false
+end
+
+function Security.UnmarkServerEntity(ent) if ent then serverEnts[ent] = nil end end
+
+--- Criterio completo de adopción: entidad del servidor + vacía + cerca de las coords de BD + mismo modelo.
+---@param ent integer
+---@param plate string
+---@param dbCoords vector3|{x:number,y:number,z:number}
+---@param modelHash integer
+---@param tolerance number|nil  (por defecto Config.ParkedMoveTolerance o 5.0)
+---@return boolean ok, string|nil reason
+function Security.CanAdopt(ent, plate, dbCoords, modelHash, tolerance)
+    if not Security.IsServerEntity(ent, plate) then return false, 'not_server_entity' end
+    if (GetEntityModel(ent) & 0xFFFFFFFF) ~= ((tonumber(modelHash) or 0) & 0xFFFFFFFF) then return false, 'model_mismatch' end
+    if not Utils.IsVehicleEmpty(ent) then return false, 'occupied' end
+    tolerance = tolerance or (type(Config) == 'table' and Config.ParkedMoveTolerance) or 5.0
+    if not dbCoords or not Security.IsNearCoords(GetEntityCoords(ent), dbCoords, tolerance) then return false, 'moved' end
+    return true
+end
+
+function Security.IsNearCoords(a, b, max)
+    if not a or not b then return false end
+    local dx, dy, dz = a.x - b.x, a.y - b.y, a.z - b.z
+    return (dx * dx + dy * dy + dz * dz) <= max * max
+end
+
+-- Limpieza periódica de handles muertos (tabla acotada)
+CreateThread(function()
+    while true do
+        Wait(300000)
+        for ent in pairs(serverEnts) do if not DoesEntityExist(ent) then serverEnts[ent] = nil end end
+    end
+end)
+
+---------------------------------------------------------------------------
 -- SQL seguro
 ---------------------------------------------------------------------------
 --- Devuelve el identificador SQL si está en la whitelist; error si no.

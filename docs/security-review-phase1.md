@@ -167,3 +167,85 @@ Commits revisados: `e75117f`, `c5a8644`, `f77d546`, `c17d56c` (snapshot de props
 - `Security.ClampMileage(plate, oldKm, newKm, elapsedSec) -> km, clamped` (backend: `props.lua:77` ✔).
 - `Security.SanitizeProps(props, dbRow, entity, elapsedSec) -> clean|nil, err, json` (backend: `props.lua:34` ✔).
 - Nuevo: `Security.PropSnapshotFields`, la lista de campos que un snapshot de un no-dueño puede actualizar (para N2).
+
+---
+
+# Re-revisión 2 (16/10/2026, 22:45 UTC+1)
+
+Commits revisados: `ca4a415`, `078ac23` (backend) y `f6f2495` (frontend, cliente). Los archivos de servidor en HEAD (`5a12ada`) no cambian respecto de `078ac23`.
+
+## Veredicto sobre los bloqueantes de fase 1
+
+| # | Veredicto | Motivo |
+|---|---|---|
+| **N1** | **ABIERTO — bloquea fase 1** | El criterio de `server/streamer.lua:84-91` (`adoptable`) se puede saltar de dos formas (ver «Evaluación de N1»). Además, la adopción tras reinicio (`server/persistence.lua:107-116`) no aplica ningún criterio de entidad del servidor. |
+| **N2** | **Cerrado** | `streamer.lua:124-131` + `:202`: si quien responde no es dueño ni tiene llave, solo se fusionan los campos de `Security.PropSnapshotFields` sobre las props de BD, y el resultado vuelve a pasar por `SanitizeProps` dentro del lock. Detalle menor (N2b, Bajo): si las props de BD no traen `model` (filas importadas del framework), la fusión se rechaza por `model_mismatch` y no se guarda nada (falla cerrado, es seguro). *Arreglo:* `base.model = Utils.ModelHash(row.model)` antes de sanear. |
+| **N3** | **Cerrado** | `server/props.lua` (`doSpawn(holder, …)` / `SpawnVehicle`): el handle se guarda en `holder.veh` justo después de `CreateVehicleServerSetter`, y si hay error o timeout se hace `DeleteEntity`. H1 queda así **cerrado**. |
+
+## Estado del resto
+
+| # | Estado | Nota |
+|---|---|---|
+| N4 | Cerrado | `becameDriven`: `ClaimSpawn` y el paso a OUT solo para dueño o llave; si no, se registra con un throttle de 60 s. |
+| N5 | Cerrado | `mileage_ts = UNIX_TIMESTAMP(COALESCE(parked_at, updated_at))` como base cuando no hay marca en memoria, y `StampMileage` al adoptar y en `becameDriven`. |
+| N6 | **Parcial** | `props.lua:75` hace `math.randomseed((os.time() ~ (GetGameTimer() << 16)) & 0x7FFFFFFF)`. Esto **empeora** la entropía: reemplaza la semilla aleatoria de Lua 5.4 por una derivada de la hora, que se puede predecir. Ver N11. |
+| N7 | Cerrado | `prune`/`Refresh` purgan `backoff` y `driveDenied`, `mileageStamp` tiene `ForgetMileage` + barrido de 24 h, y `snaps` se cierra en `playerDropped`. |
+| N8 | Cerrado | `MDP.Props.Sanitize` falla cerrado (`sanitizer_missing`). |
+| N9 | Cerrado | `despawnParked` relee la fila de BD y compara contra ella. |
+| M4 | Cerrado | `MDP.Props.Health` delega en `Security.ClampHealth`. `078ac23` también lo aplica a la salud importada de QB. |
+
+## Evaluación de N1 (`NetworkGetFirstEntityOwner`)
+
+Fuentes: código de FiveM, `ServerGameState_Scripting.cpp` (`NETWORK_GET_FIRST_ENTITY_OWNER`); docs.fivem.net, «Migrating from other platforms» (entidades huérfanas de `CreateVehicleServerSetter`) y «State Bags»; PR citizenfx/fivem#2257.
+
+1. **`NetworkGetFirstEntityOwner` devuelve `-1` en dos casos:** cuando la entidad no tiene primer dueño (creada por el servidor y todavía huérfana) **y** cuando el primer dueño se desconectó (`firstOwnerDropped`). Un atacante crea el clon con un cliente (o con una cuenta secundaria), le pone la matrícula, se desconecta, y el clon pasa como «creado por el servidor». Encima, una entidad del servidor que ya tuvo un cliente cerca puede tener un primer dueño cliente, así que el criterio también da falsos negativos. **No sirve como prueba de origen.**
+2. **`Entity(ent).state.mdp_plate == plate` es falsificable.** Por defecto, el cliente que es dueño de red de una entidad puede escribir state bags **replicadas** de esa entidad (`state:set(k, v, true)`). Solo `sv_stateBagStrictMode true` lo impide, y para todos los scripts. Un cliente crea su coche, le pone `mdp_plate = '<matrícula de otro>'` y pasa la primera rama de `adoptable` (`streamer.lua:87`).
+3. `GetEntityPopulationType` tampoco distingue: los vehículos «de misión» creados por un cliente y los del servidor comparten tipo.
+
+### Criterio recomendado (implementado en `server/security.lua`)
+- `Security.MarkServerEntity(ent, plate)`: llamarlo **solo** en `MDP.Props.SpawnVehicle`, justo después de que exista la entidad. Guarda el handle en una tabla en memoria y escribe la clave `mdp_srv` en una state bag **no replicada** (`replicated = false`, nunca se envía a clientes) con el valor `joaat(secreto .. ':' .. plate)`. El secreto sale de la convar `mdp_garages_entity_secret` (recomendado: `set mdp_garages_entity_secret "<cadena larga aleatoria>"` en server.cfg, **no** `setr`). Si no existe, se usa un KVP del recurso generado una vez. Los clientes no conocen el secreto: aunque escriban `mdp_srv`, el valor no coincidirá.
+- `Security.IsServerEntity(ent, plate)`: en esta ejecución mira la tabla de handles. Tras reiniciar el recurso, la etiqueta secreta sigue en la entidad (las state bags viven con la entidad, no con el recurso).
+- `Security.CanAdopt(ent, plate, dbCoords, modelHash, tolerance?) -> ok, reason`: comprueba entidad del servidor, mismo modelo, todos los asientos vacíos y distancia a las coords de BD ≤ `ParkedMoveTolerance`. Motivos de rechazo: `not_server_entity`, `model_mismatch`, `occupied`, `moved`.
+- **Si no pasa:** no adoptar nunca. Si está vacía y no es del servidor → `DeleteEntity` (es un clon) + `LogReject` / `OnSuspicious`; si está ocupada → ignorarla y registrarla.
+- **Endurecimiento recomendado del servidor (documentar en README/integrations):** `sv_entityLockdown strict` (o `relaxed`) para que los clientes no creen entidades sincronizadas; `sv_filterRequestControl 2` (o `1`) para que no puedan quitar el control de vehículos ocupados; `sv_stateBagStrictMode true` solo si ningún otro script escribe state bags desde el cliente. Atención: `bridge/vehicle/props.lua` no escribe state bags desde el cliente (solo responde con eventos), pero otros recursos del servidor podrían hacerlo. Si la build lo soporta (PR #2257), usar `SetStateBagKeyPolicy` para proteger `mdp_plate`.
+
+### Cambios requeridos al backend para cerrar N1
+1. `server/props.lua` (`SpawnVehicle`, tras `DoesEntityExist`): `Security.MarkServerEntity(veh, row.plate)`.
+2. `server/streamer.lua:84-91`: reemplazar `adoptable` por `Security.CanAdopt(ent, plate, pos, Utils.ModelHash(row.model))`. Borrar las ramas `mdp_plate` y `NetworkGetFirstEntityOwner`.
+3. `server/persistence.lua:107-116` (adopción al arrancar): el mismo `Security.CanAdopt` antes de `TrackSpawn`. Si no pasa, no adoptar (y no borrar si está ocupada).
+4. Al despawnear o guardar: `Security.UnmarkServerEntity(veh)` antes de `DeleteEntity` (opcional; hay barrido periódico).
+
+## Nuevos hallazgos (backend)
+
+### High
+**N10 — `mdp_plate` replicada y falsificable, usada como señal de confianza en arranque y parada**
+`server/persistence.lua:16-20` (`forEachOwnEntity`), `:140` y `:207`. Un cliente puede etiquetar cualquier vehículo suyo con `mdp_plate = '<matrícula de otro>'`. En `onResourceStop`, `saveEntityCoords` (l.8-12) escribe las coords del clon en la fila OUT de la víctima. Al arrancar, l.140 borra entidades etiquetadas que considera huérfanas (borrado de vehículos ajenos). *Arreglo:* `forEachOwnEntity` debe filtrar con `Security.IsServerEntity(veh, plate)` además de `mdp_plate`.
+
+### Low
+**N11 — Semilla predecible**
+`server/props.lua:75`. Quitar `math.randomseed(...)` (Lua 5.4 ya siembra con hora y dirección de memoria). Mientras siga, los tokens de `NewToken` son más predecibles. El secreto de entidades de `security.lua` se genera **al cargar** el módulo, y si hay convar no usa `math.random`.
+
+**N2b** — ver la tabla del veredicto.
+
+## Revisión del cliente / NUI — `f6f2495` (Frontend)
+
+Eventos y callbacks que dispara el cliente: `lib.callback` `mdp_garages:storeVehicle` y `mdp_garages:parkWorld` (`client/zones.lua`), y `mdp_garages:getVehicles` / `mdp_garages:takeOut` a través de los callbacks NUI de `client/main.lua:69-84`. No añade `TriggerServerEvent` nuevos. El export `GarageToast` es solo local.
+
+| Dato enviado | ¿El servidor confía? | Valoración |
+|---|---|---|
+| `netId` | No: la matrícula se resuelve en el servidor (`resolvePlate`) | OK |
+| `garage_id` | No: se valida el formato y la existencia en config, y la distancia se mide con coords de config | OK |
+| `props` | No: `SanitizeProps` (whitelist, modelo = BD y entidad, matrícula del servidor, 16 KB) | OK |
+| `fuel` | Parcial: se acota a 0-100 y ≤ BD + 2 | OK |
+| `mileage` | No: `ClampMileage` según el tiempo | OK |
+| `vclass` | Solo como pista: `Config.VehicleTypes` > `GetVehicleType` del servidor > clase | OK (Bajo: con un `vclass` falso solo cambia el tipo si el servidor no puede resolverlo) |
+| Precios / coords | No se envían | OK |
+| Matrícula (takeOut) | Normalizada y validada en el cliente **y** en el servidor (schema + propiedad) | OK |
+
+**Rate:** `busy` en el cliente (una petición a la vez) más el rate limit del servidor (1/s para store/park, 5/10 s para la lista). Correcto.
+
+**NUI:** no hay `dangerouslySetInnerHTML`, `innerHTML`, `eval` ni `new Function` en `web/src`. Los toasts renderizan `title`/`description` como texto de React (escapado). Los códigos de error pasan por `Utils.ErrorCode` (whitelist).
+
+### Hallazgos del cliente
+- **F1 (Bajo) — `busy` puede quedarse en `true`** (`client/zones.lua`, `storeCurrent` y `/mdp_park`): si `readVehicle`, `GetLabelText` o `toast` lanzan un error antes de `busy = false`, el jugador ya no puede guardar ni aparcar hasta reconectar. Solo le afecta a él (no es un riesgo para el servidor). *Arreglo:* envolver el cuerpo en `pcall` y poner `busy = false` en un único punto final.
+- **F2 (Info) — Etiquetas de modelos addon en los toasts:** `GetLabelText` de un vehículo addon puede contener `<`, `>` o `~r~`. Se muestra como texto (sin riesgo XSS); como mucho son códigos de color sin interpretar. Sin acción.
