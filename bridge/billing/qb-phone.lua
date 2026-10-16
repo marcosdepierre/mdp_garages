@@ -6,6 +6,7 @@ local RES = 'qb-phone'
 
 Bridge.RegisterAdapter('billing', RES, {
     SupportsPaidHook = true,
+    SupportsFines = true,
     SendBill = function(src, target, amount, reason, society, meta)
         if not Bridge.ValidAmount(amount) then return false end
         local cid = Bridge.GetIdentifier(target); if not cid then return false end

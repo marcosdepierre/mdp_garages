@@ -6,6 +6,7 @@ local RES = 'esx_billing'
 
 Bridge.RegisterAdapter('billing', RES, {
     SupportsPaidHook = true,
+    SupportsFines = true,
     SendBill = function(src, target, amount, reason, society, meta)
         if not Bridge.ValidAmount(amount) then return false end
         local sender = (src and src > 0 and Bridge.GetIdentifier(src)) or 'server'

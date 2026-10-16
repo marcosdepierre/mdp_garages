@@ -155,11 +155,13 @@ The UI is React + Untitled UI, built to `web/dist` (manifest: `ui_page 'web/dist
 
 **Lua → NUI (SendNUIMessage)**
 ```
-{ action = 'open',   view = 'list' | 'detail', data = OpenData }
+{ action = 'open',   view = 'list' | 'detail', data = OpenData, locale = UILocale }
 { action = 'update', data = table, view? = 'list' | 'detail' }   -- partial: data is MERGED onto the current state (only the keys sent change)
 { action = 'close' }
 ```
-`OpenGarageUI(view, data)` sends `open` and calls `SetNuiFocus(true, true)`. ESC is handled by the NUI, which calls `close`; the client also has an ESC/pause-menu safety net.
+`OpenGarageUI(view, data)` sends `open` and calls `SetNuiFocus(true, true)`. **Closing is NUI-only**: the NUI handles ESC and calls `close`. While the UI is open, the client runs a per-frame loop that only disables the pause-menu controls (199, 200), and the loop exits when the UI closes. There is no ESC handling in Lua.
+
+`UILocale` is a flat `{ [key] = string }` table built from the active locale's `ui` sub-table, with English filling any missing key. Keys: `title, close, back, vehicles, search, empty, loading, take_out, details, retired_section, retired_hint, state_out, state_garaged, state_parked, state_impounded, state_retired, plate, model, fuel, engine, body, mileage, location, owner, key_holder, impound_fee, release_after, error`. The NUI must not hardcode any user-facing text.
 
 **Object shapes**
 ```

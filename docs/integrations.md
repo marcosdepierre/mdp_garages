@@ -37,6 +37,16 @@ local function try(fn, ...) local ok, res = pcall(fn, ...) if not ok then print(
 | Qbox | No hay recurso de billing oficial. `Qbox-project/qbx_phone` está archivado. Qbox usa qb-phone, lb-phone, npwd o okok. `Config.Billing = 'qbx_core'` (prioridad de `init.lua`) no tiene API de facturas: solo sirve para el modo instant. | — | ✅ (lista de repos de la organización Qbox-project) |
 | okokBilling | `TriggerServerEvent("okokBilling:CreateCustomInvoice", target, price, reason, invoiceSource, society, societyName, authorIdentifier)` (documentado para el cliente) | No documentado → **false**; además no devuelve un id de factura | ✅ firma: https://docs.okokscripts.io/scripts/okokbilling/snippets · ⚠️ llamarlo desde el servidor con `TriggerEvent` (recurso escrow, no se puede ver el código) |
 
+**Multas: canales y revisión (decisiones del Senior):**
+- `impl.SupportsFines`: vale `true` en esx_billing y qb-phone, y `false` en **okokBilling**. okok **no se usa para multas** porque no tiene paid hook ni devuelve un id de factura. Si okok está detectado, `IssueFine` envía la multa por el canal `internal` (`/mdp_payfine` o la UI) y al arrancar se muestra un aviso en consola. okok sigue siendo válido para tasas con `Config.ChargeMode = 'invoice'`.
+- `mdp_fines.channel` (`Constants.FineChannel`) puede ser `internal`, `invoice`, `external` o `needs_review`. `mdp_fines.paid` (`Constants.FineStatus`) puede ser `UNPAID=0`, `PAID=1`, `CLAIMING=2` o `VOIDED=3`. La anulación usa `paid = VOIDED`, sin columna nueva, y está aislada en `voidFine()` dentro de `server/fine_review.lua`.
+- `BillingCommon.Link(...)` devuelve un boolean y registra el fallo en el log. Si `SendBill` crea la factura pero el enlace no se guarda (`HasInvoice` es false), `IssueFine` pone `channel = 'needs_review'` y lo registra en el log. Con ese estado, `/mdp_payfine` queda bloqueado para evitar el doble cobro.
+- `BillingCommon.OnPaid` es idempotente: resuelve el `fineId` solo a través de `mdp_fine_invoices`, usa un guard in-flight por `fineId` y llama a `MarkFinePaid` como máximo una vez. Nunca mueve dinero.
+- Comando de administración `/mdp_finereview <id> paid|void` (`server/fine_review.lua`). Lo puede usar la consola o cualquiera con el ACE `mdp_garages.admin` (`add_ace group.admin mdp_garages.admin allow`). Solo actúa sobre filas con `channel='needs_review'` y `paid=UNPAID`:
+  - `paid` → `Bridge.Billing.MarkFinePaid(id, src)` y después `channel = 'invoice'` (el pago se hizo por la factura externa).
+  - `void` → `UPDATE mdp_fines SET paid = VOIDED WHERE id = ? AND paid = UNPAID AND channel = 'needs_review'`. Solo cuenta como éxito si `affectedRows == 1`.
+  - Cada acción se registra en el log de consola y se notifica con `Bridge.Notify`.
+
 Implementado en `bridge/billing/esx_billing.lua`, `qb-phone.lua`, `okokBilling.lua` y `_common.lua`. Ejemplo (esx_billing):
 ```lua
 Bridge.RegisterAdapter('billing', 'esx_billing', {
@@ -206,7 +216,8 @@ Config.Phone     = 'auto' -- 'lb-phone' | 'npwd' | 'qb-phone' | 'none'
 
 Estados de vehículo: `mdp_vehicles.state` es TINYINT. Las constantes están en `shared/constants.lua` (ya existía, no se ha modificado):
 ```lua
-VehicleState = { OUT = 0, GARAGED = 1, PARKED_WORLD = 2, IMPOUNDED = 3 }
+Constants.VehicleState = { OUT = 0, GARAGED = 1, PARKED_WORLD = 2, IMPOUNDED = 3, RETIRED = 4 }
+Constants.FineStatus   = { UNPAID = 0, PAID = 1, CLAIMING = 2, VOIDED = 3 }
 ```
 Nota: la decisión decía `PARKED`, pero el archivo existente usa `PARKED_WORLD`. Se mantiene `PARKED_WORLD`. Todas las tablas llevan el prefijo `mdp_` (`mdp_vehicles`, `mdp_fines`, `mdp_fine_invoices`). `vehicle` es la matrícula (string), salvo que se indique otra cosa.
 
@@ -217,7 +228,7 @@ Nota: la decisión decía `PARKED`, pero el archivo existente usa `PARKED_WORLD`
 | `GiveKeys(src, plate, opts?)` | servidor | opts `{ temporary?:bool, silent?:bool }` | boolean |
 | `RemoveKeys(src, plate, opts?)` | servidor | ídem | boolean |
 | `GetVehicleState(plate)` | servidor | plate | `{ state:integer(VehicleState), garage, fuel, engine, body, owner }` \| nil |
-| `SetVehicleState(plate, state, garage?)` | servidor | state: integer de `VehicleState` (0–3), garage:string opcional | boolean |
+| `SetVehicleState(plate, state, garage?)` | servidor | state: integer de `Constants.VehicleState` (0–4), garage:string opcional | boolean |
 | `ImpoundVehicle(plate, data?)` | servidor | data `{ fee?:number, reason?:string, by?:number(src), lot?:string, until?:unix }` | boolean, err? |
 | `ReleaseImpound(plate, src?, chargeFee?)` | servidor | src que paga; chargeFee default true | boolean, err? |
 | `GetPlayerVehicles(src\|identifier, filter?)` | servidor | filter `{ state?, garage?, type? }` | array de `{ plate, model, state:integer, garage, fuel }` |
@@ -230,9 +241,9 @@ Ejemplos:
 if exports.mdp_garages:HasKeys(source, 'ABC 123') then ... end
 exports.mdp_garages:GiveKeys(source, plate, { temporary = true })
 local ok, err = exports.mdp_garages:ImpoundVehicle(plate, { fee = 500, reason = 'Mal aparcado', by = source })
-local st = exports.mdp_garages:GetVehicleState(plate) -- st.state == VehicleState.IMPOUNDED (3)
-exports.mdp_garages:SetVehicleState(plate, VehicleState.GARAGED, 'legion')
-for _, v in ipairs(exports.mdp_garages:GetPlayerVehicles(source, { state = VehicleState.GARAGED })) do print(v.plate) end
+local st = exports.mdp_garages:GetVehicleState(plate) -- st.state == Constants.VehicleState.IMPOUNDED (3)
+exports.mdp_garages:SetVehicleState(plate, Constants.VehicleState.GARAGED, 'legion')
+for _, v in ipairs(exports.mdp_garages:GetPlayerVehicles(source, { state = Constants.VehicleState.GARAGED })) do print(v.plate) end
 -- cliente
 if exports.mdp_garages:HasKeys(GetVehiclePedIsIn(PlayerPedId(), false)) then ... end
 ```

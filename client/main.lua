@@ -1,5 +1,6 @@
 -- NUI plumbing (contract: docs/architecture.md "NUI contract"). No globals: local UI table + exports.
 local UI = { open = false }
+local blockPauseWhileOpen -- defined below
 
 local function setClosed()
     SetNuiFocus(false, false)
@@ -8,9 +9,12 @@ end
 
 --- Open the garage UI. view = 'list' | 'detail'
 function UI.Open(view, data)
-    SendNUIMessage({ action = 'open', view = view or 'list', data = data or {} })
+    SendNUIMessage({ action = 'open', view = view or 'list', data = data or {}, locale = UILocale() })
     SetNuiFocus(true, true)
-    UI.open = true
+    if not UI.open then
+        UI.open = true
+        blockPauseWhileOpen()
+    end
 end
 
 --- Partial update: NUI merges `data` onto its current state.
@@ -59,19 +63,20 @@ RegisterNUICallback('takeOut', function(req, cb)
     cb(res)
 end)
 
--- ESC is handled by the NUI (calls 'close'). This loop only blocks the pause menu while open and
--- recovers a hung focus state (UI marked open but NUI no longer focused).
-CreateThread(function()
-    while true do
-        if UI.open then
-            DisableControlAction(0, 200, true)
-            if not IsNuiFocused() then setClosed() end
+-- Closing is NUI-only (the NUI handles ESC and calls 'close'). While open, this loop only disables the
+-- pause menu controls every frame (plus non-ESC stuck-focus recovery), and exits as soon as the UI is closed.
+function blockPauseWhileOpen()
+    CreateThread(function()
+        local graceUntil = GetGameTimer() + 1000
+        while UI.open do
+            -- stuck-focus recovery (not ESC-based): UI marked open but NUI lost focus
+            if GetGameTimer() > graceUntil and not IsNuiFocused() then setClosed() break end
+            DisableControlAction(0, 199, true) -- INPUT_FRONTEND_PAUSE
+            DisableControlAction(0, 200, true) -- INPUT_FRONTEND_PAUSE_ALTERNATE
             Wait(0)
-        else
-            Wait(500)
         end
-    end
-end)
+    end)
+end
 
 AddEventHandler('onResourceStop', function(res)
     if res == GetCurrentResourceName() and UI.open then SetNuiFocus(false, false) end
