@@ -96,3 +96,12 @@ R6-2: cerrado (pcall en AddVehicle). R6-1: cerrado en persistence.lua, parcial e
 | P1F-R2-L2 | Baja | client/zones.lua:53 | El error tardío después del timeout de 15 s se descarta: el jugador solo ve "timeout". | Mostrar el error tardío si `attempt == token`. |
 | P1F-R2-L3 | Baja | web/UNTITLEDUI_PATCHES.md:172 | Viñeta "Reason" en inglés que repite la sección sonner en español. El commit se describió como frontend pero toca Lua. | Juntar en un solo texto y describir el alcance real. |
 | P1F-R2-L4 | Baja | web/src/types/index.ts:60-64 | Falta el test que compara las 5 listas de códigos de error. | Test o script de CI. |
+
+## Desde QA frontend fase 1 R3 (16/10/2026, 169cb30)
+- **Cerrados:** P1F-M2, P1F-R2-M1, P1F-R2-L2, P1F-R2-L3, P1F-R2-L4 (con la reserva R3-L1).
+- **Sigue abierto:** P1F-R2-L1 (`ox:callbackTimeout` no documentado fuera de un comentario de código).
+
+| # | Severidad | Archivo:línea | Descripción | Arreglo |
+|---|---|---|---|---|
+| P1F-R3-M1 | Media | client/zones.lua:49-50 | El callback asíncrono ignora el 2.º valor: los rechazos de Security (`false, 'rate_limited'/'too_far'/'invalid_request'`) salen como "Server error"; `res.error` no se normaliza con `Utils.ErrorCode` (`plate_unresolved:nil` → "Request rejected"). | Normalizar igual que `serverCall` en client/main.lua:53-60. |
+| P1F-R3-L1 | Baja | web/tests/error-codes.e2e.mjs:17-19 | Si falta `err_<c>` en en.lua solo hay WARN, y es.lua no se comprueba. | Hacer que falle si falta la clave en en.lua o es.lua. |

@@ -83,3 +83,34 @@ Revisión del commit a2700ae (16/10/2026), que dice cerrar P1F-M1 y P1F-M2.
 
 ### Veredicto R2
 P1F-M1 cerrado. P1F-M2 abierto por R2-M1 (Media), que se arregla en una línea. No hay Críticas ni Altas. P1F-M3 parece resuelto como efecto colateral.
+
+## R3 — 169cb30
+Revisión de 169cb30 (16/10/2026), con los cambios de Backend b17d813/f01f58d (solo vehículos propios). El commit toca `client/zones.lua` y `web/*`, y su mensaje ya lo dice ("Frontend+client Lua").
+
+**Comprobaciones** (worktree limpio en 169cb30):
+- `/tmp/luac54 -p client/zones.lua` → OK.
+- `npm run build` + `diff -r` contra el `web/dist` del commit → idénticos. Sin `innerHTML`.
+- `npm run test:e2e` → 4 suites OK (error-codes, n16 7/7, phase1 15/15, r5 6/6).
+- Test de mutación de `error-codes.e2e.mjs`: falla bien si se quita un código de `Constants.ErrorCodes`, de `architecture.md`, de `NUI_ERROR_CODES` o de `i18n.tsx`, o si cambia el texto en `en.lua`. **No falla** si se quita la clave de `locales/en.lua` (solo WARN) ni si se quita de `locales/es.lua` (es.lua no se mira). Ver R3-L1.
+- Harness Lua 5.4 con el `guarded` real (reloj simulado, `lib.callback` y `GarageToast` simulados): timeout a 15 s ✅; B bloqueado entre 15 y 20 s ✅; B enviado después del backstop ✅; **el éxito tardío de A ya no toca el toast de B** ✅; error tardío en el mismo intento (`world_limit` a los 16 s) se muestra ✅; después `busy` se libera ✅.
+- Playwright sobre `web/dist`: `not_owned_vehicle` → "You can only store your own vehicles", `vehicle_mismatch` → "This is not the registered vehicle", `not_owner` → "This vehicle is not yours" ✅. El error tardío reemplaza el toast de timeout (mismo id) ✅.
+- Códigos del servidor: todos los literales de `error = '…'` de server/*.lua y el mapa `STORE_ERR` están en `NUI_ERROR_CODES`. Solo quedan fuera los rechazos internos de Security (`job_denied`, `payload_not_table`, `resolve_error`, `internal_error`), que según el diseño se muestran como `rejected` o `server_error`.
+
+**Estado:**
+- **P1F-R2-M1: cerrado.** Ahora se comprueba `attempt == token` (client/zones.lua:54).
+- **P1F-R2-L2: cerrado.** El error tardío del mismo intento se muestra.
+- **P1F-R2-L3: cerrado.** Nota de sonner juntada en un solo texto en español y alcance descrito en el commit.
+- **P1F-R2-L4: cerrado con reservas.** El test existe y compara NUI ↔ Constants ↔ architecture ↔ i18n (+ texto de en.lua), pero no exige las claves de en.lua/es.lua (R3-L1).
+- **P1F-R2-L1: abierto.** `ox:callbackTimeout` solo aparece en un comentario de `client/zones.lua:7-9`. No está en README, docs de instalación ni config.
+- **P1F-M2: cerrado** (lo que queda está en R2-L1).
+- Nuevos códigos `not_owned_vehicle`/`vehicle_mismatch` y texto nuevo de `not_owner`: correctos en NUI, en.lua y es.lua.
+
+### Incidencias nuevas
+| # | Severidad | Archivo:línea | Descripción y repro | Arreglo propuesto |
+|---|---|---|---|---|
+| P1F-R3-M1 | Media | client/zones.lua:49-50 | El callback asíncrono solo lee el primer valor. Cuando Security rechaza (`return false, err` en server/security.lua:832: `rate_limited`, `too_far` de la distancia al garaje, `invalid_request` del schema, `invalid_source`), el cliente recibe `false` y muestra **"Server error"**. Además `res.error` no pasa por `Utils.ErrorCode`, así que `plate_unresolved:nil` llega tal cual y la NUI lo enseña como "Request rejected". Repro (harness): `cb(false, 'rate_limited')` → toast `error:server_error`. En el juego: pulsar E dos veces en menos de 1 s, o lanzar `/mdp_park` dos veces seguidas. Es anterior a este commit (el `call` antiguo hacía lo mismo), pero no se vio en R2. `client/main.lua:53-60` (`serverCall`) ya lo hace bien. | `function(res, err)`: si `res == false` → `{ ok=false, error=Utils.ErrorCode(err) }`; si `res.ok == false` → `res.error = Utils.ErrorCode(res.error)` (igual que `serverCall`). |
+| P1F-R3-L1 | Baja | web/tests/error-codes.e2e.mjs:17-19 | Si falta la clave en `locales/en.lua` solo sale WARN, y `locales/es.lua` no se comprueba. Repro: borrar `err_occupied` de es.lua o de en.lua → el test pasa (rc=0). | Fallar si falta `ui.err_<c>` en en.lua o es.lua (excepto `timeout`, si se documenta como solo-UI). |
+| P1F-R2-L1 (sigue) | Baja | README / docs de instalación | No se documenta que hay que poner `setr ox:callbackTimeout 20000` (o menos) para que el backstop de 20 s no deje reenviar con la petición aún viva. | Añadirlo en README (requisitos de server.cfg) y en la guía de instalación. |
+
+### Veredicto R3
+R2-M1, R2-L2 y R2-L3 cerrados. R2-L4 cerrado con la reserva R3-L1. R2-L1 sigue abierto (falta documentarlo). Nueva Media P1F-R3-M1 (rechazos de Security en store/park se muestran como "Server error"). No hay Críticas ni Altas.
