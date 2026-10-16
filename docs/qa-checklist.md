@@ -143,3 +143,16 @@ Cada caso de F1-B a F1-G se ejecuta en las tres variantes:
 ## F1-I. Backlog de fase 0 a verificar
 - [ ] R6-1, R6-2, NUI-R4-1 a R4-4 y NUI-R5-1/R5-2 de `docs/backlog-phase1.md` cerrados o reclasificados.
 - [ ] N11: transparencia de la NUI comprobada en el cliente FiveM real.
+
+## F1-J. Solo vehículos propios (saltárselo = High)
+La propiedad se valida SIEMPRE en el servidor, contra la BD (`owned_vehicles.owner` / `player_vehicles.citizenid`) y el identificador del jugador que hace la petición, nunca con datos que mande el cliente.
+- [ ] Coche de NPC robado (sin fila en la BD): se rechaza al guardar y al aparcar.
+- [ ] Coche de otro jugador (la fila existe con otro owner/citizenid): se rechaza aunque el jugador lo conduzca.
+- [ ] Llave temporal o compartida (qbx_vehiclekeys, qb-vehiclekeys, llaves dadas o prestadas): tener llave NO cuenta como ser dueño; se rechaza.
+- [ ] Matrícula falsificada: el cliente manda la matrícula de un coche propio pero está en otra entidad; el servidor valida la entidad (marca HMAC o netId) y que la matrícula real coincida.
+- [ ] Props o modelo del cliente que no cuadran con la fila de la BD: se rechaza o se sanea, nunca se sobrescribe el modelo.
+- [ ] Coche que ya no es del jugador (vendido o transferido mientras está fuera): se rechaza.
+- [ ] Estados: no se puede guardar un coche incautado (3), retirado (4) o REMOVED (5) usando este camino.
+- [ ] Todas las entradas pasan por la misma comprobación: zona del garaje, comando `/mdp_park`, NUI, exports y eventos de red llamados a mano (p. ej. con un executor de Lua).
+- [ ] El rechazo tiene un código de error propio y la NUI muestra su mensaje (no un timeout genérico).
+- [ ] Los mismos casos se prueban en ESX, QBCore y Qbox.
