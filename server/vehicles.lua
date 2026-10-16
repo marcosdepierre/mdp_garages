@@ -178,11 +178,14 @@ function Vehicles.InsertBatch(rows, opts)
             elseif not e then
                 -- M5: if the framework table has a date column, a NULL or future date is never adoptable
                 local age = r.fwHasDate and r.fwCreatedTs and (os.time() - (tonumber(r.fwCreatedTs) or -1)) or nil
-                -- fail closed: without a DATETIME/TIMESTAMP date column in the framework table, never adoptable
-                local adoptable = adoptableImport and r.state == VS.OUT
-                    and r.fwHasDate and age ~= nil and age >= -300 and age <= 1800 -- AD-2: small clock skew allowed
-                ph[#ph + 1] = adoptable and "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'framework', NULL)"
-                    or "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'framework', NOW())"
+                -- v6: incremental new detection -> first_seen_at = NOW() (server-written). If the framework table has a
+                -- DATETIME/TIMESTAMP date column, it must also be within -300..1800 s (NULL date -> not adoptable).
+                local fwOk = (not r.fwHasDate) or (age ~= nil and age >= -300 and age <= 1800)
+                local adoptable = adoptableImport and r.state == VS.OUT and fwOk
+                local fwDate = (adoptable and r.fwHasDate and tonumber(r.fwCreatedTs)) and math.floor(tonumber(r.fwCreatedTs)) or nil
+                ph[#ph + 1] = adoptable
+                    and ("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'framework', NULL, NOW(), %s)"):format(fwDate and ('FROM_UNIXTIME(%d)'):format(fwDate) or 'NULL')
+                    or "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'framework', NOW(), NULL, NULL)"
                 if adoptable then print(('[mdp_garages] %s imported for %s as new detection (adoptable 30 min)'):format(r.plate, tostring(r.owner))) end
                 -- explicit indices: props/garage_id may be nil (ipairs would stop early)
                 local vals = { r.plate, r.owner, r.model, (Config.VehicleTypes or {})[r.model] or r.vtype or 'automobile',
@@ -196,7 +199,7 @@ function Vehicles.InsertBatch(rows, opts)
         end
         if #ph > 0 then
             inserted = inserted + (MySQL.update.await(
-                'INSERT IGNORE INTO mdp_vehicles (plate, owner, model, vtype, props, state, garage_id, fuel, engine, body, source, managed_at) VALUES '
+                'INSERT IGNORE INTO mdp_vehicles (plate, owner, model, vtype, props, state, garage_id, fuel, engine, body, source, managed_at, first_seen_at, fw_date_at) VALUES '
                 .. table.concat(ph, ', '), params) or 0)
         end
     end

@@ -106,7 +106,15 @@ local function upgradeSchema()
             print(('[mdp_garages] schema upgrade v5: %d synced owners seeded, initial import marked done'):format(n))
         end
     end
-    MySQL.insert.await('INSERT IGNORE INTO mdp_schema_version (version) VALUES (1), (2), (3), (4), (5)')
+    -- v6: first_seen_at / fw_date_at (imported-row adoption). Added as NULL: existing rows are never adoptable.
+    if hasTable('mdp_vehicles') and not hasColumn('mdp_vehicles', 'first_seen_at') then
+        MySQL.query.await("ALTER TABLE `mdp_vehicles` ADD COLUMN `first_seen_at` DATETIME NULL DEFAULT NULL AFTER `managed_at`")
+        print('[mdp_garages] schema upgrade v6: first_seen_at added (existing rows NULL)')
+    end
+    if hasTable('mdp_vehicles') and not hasColumn('mdp_vehicles', 'fw_date_at') then
+        MySQL.query.await("ALTER TABLE `mdp_vehicles` ADD COLUMN `fw_date_at` DATETIME NULL DEFAULT NULL AFTER `first_seen_at`")
+    end
+    MySQL.insert.await('INSERT IGNORE INTO mdp_schema_version (version) VALUES (1), (2), (3), (4), (5), (6)')
 end
 
 local function onStart()

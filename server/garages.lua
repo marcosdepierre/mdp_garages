@@ -281,9 +281,14 @@ end
 --- Core checks + mark/track/managed. Caller holds the plate lock. Returns true | false, code.
 --- opts = { src?, requireOwnerSrc?, requireDriver?, windowSec, evName, invoker? }
 local function adoptUnmarked(ent, plate, opts)
-    local row = MySQL.single.await([[SELECT owner, model, state, managed_at,
-        (created_at IS NOT NULL AND created_at >= NOW() - INTERVAL ? SECOND AND created_at <= NOW()) AS in_window
-        FROM mdp_vehicles WHERE plate = ?]], { opts.windowSec, plate })
+    -- window start: framework-imported rows -> later of first_seen_at / fw_date_at (first_seen_at NULL or future -> no);
+    -- mdp rows (AddVehicle) -> created_at. Allowed: -300 s (clock skew, fw date only) .. windowSec after the start.
+    local row = MySQL.single.await([[SELECT owner, model, state, managed_at, source,
+        CASE WHEN source = 'framework' THEN
+            (first_seen_at IS NOT NULL AND first_seen_at <= NOW()
+             AND TIMESTAMPDIFF(SECOND, GREATEST(first_seen_at, COALESCE(fw_date_at, first_seen_at)), NOW()) BETWEEN -300 AND ?)
+        ELSE (created_at IS NOT NULL AND created_at >= NOW() - INTERVAL ? SECOND AND created_at <= NOW()) END AS in_window
+        FROM mdp_vehicles WHERE plate = ?]], { opts.windowSec, opts.windowSec, plate })
     local src = opts.src
     local function no(code, why)
         Security.LogReject(src or 0, opts.evName, 'adopt_' .. why, { plate = plate, invoker = opts.invoker })
