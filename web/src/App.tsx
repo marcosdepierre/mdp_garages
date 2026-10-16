@@ -10,7 +10,7 @@ import { useNuiMessages } from '@/nui/useNuiMessages';
 import { useRouter } from '@/router';
 import { PANEL_H, PANEL_W, useAppScale } from '@/scale';
 import type { LocaleTable, OpenData } from '@/types';
-import { visibleVehicles } from '@/types';
+import { VehicleState, visibleVehicles } from '@/types';
 import { DetailView } from '@/views/DetailView';
 import { ListView } from '@/views/ListView';
 import { Empty } from '@/views/Empty';
@@ -78,7 +78,8 @@ export default function App() {
 
   const route = router.route;
   const title = data?.garage?.label ?? t('title');
-  const vehicleCount = visibleVehicles(data?.vehicles).length;
+  // N12: count excludes retired (state 4) and removed (5).
+  const vehicleCount = visibleVehicles(data?.vehicles).filter((v) => Number(v.state) !== VehicleState.Retired).length;
   const selectedPlate = route.name === 'detail' ? (route.params?.plate as string | undefined) : undefined;
 
   return (

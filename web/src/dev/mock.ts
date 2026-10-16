@@ -44,7 +44,7 @@ export async function mockNui(event: string, data: unknown): Promise<NuiResponse
   }
 }
 
-/** Spanish-ish sample locale to prove Lua-provided strings override the English fallback. */
-export const mockLocale = { title: 'Garaje', vehicles: 'Vehículos', retired_section: 'Retirados', close: 'Cerrar' };
+/** N15: dev mock is English only; the full table comes from the EN fallback (= locales/en.lua). */
+export const mockLocale: Record<string, string> = {};
 export const mockOpenMessage = (garage: Garage = garages[0], view: 'list' | 'detail' = 'list', plate?: string): NuiMessage =>
   ({ action: 'open', view, data: mockOpen(garage), locale: mockLocale, plate });

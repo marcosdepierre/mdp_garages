@@ -1,5 +1,5 @@
 // Untitled UI Table of vehicles (cells styled per design-system §4.2: name, plate chip, state badge, stat bars).
-import { BadgeWithDot } from '@/components/base/badges/badges';
+import { Badge, BadgeWithDot } from '@/components/base/badges/badges';
 import { ProgressBarBase } from '@/components/base/progress-indicators/progress-indicators';
 import { Table } from '@/components/application/table/table';
 import { useT } from '@/i18n';
@@ -28,7 +28,11 @@ export function VehicleTable({ label, vehicles, selected, onSelect }: {
       <Table.Body items={vehicles}>
         {(v) => {
           const meta = stateMeta(v.state);
-          const bars = [clampPct(v.engine, 10), clampPct(v.body, 10), clampPct(v.fuel)];
+          const bars = [
+            { key: 'engine', n: clampPct(v.engine, 10) },
+            { key: 'body', n: clampPct(v.body, 10) },
+            { key: 'fuel', n: clampPct(v.fuel) },
+          ];
           return (
             <Table.Row id={v.plate} className={onSelect ? 'cursor-pointer' : undefined}>
               <Table.Cell>
@@ -38,11 +42,11 @@ export function VehicleTable({ label, vehicles, selected, onSelect }: {
                 </div>
               </Table.Cell>
               <Table.Cell>
-                <span className="rounded-md bg-[#E9EDF3] px-2 py-0.5 font-mono text-xs font-bold tracking-widest text-[#0A0A0A]">{v.plate}</span>
+                <Badge type="modern" size="sm" color="gray" className="font-mono font-bold tracking-widest">{v.plate}</Badge>
               </Table.Cell>
               <Table.Cell>
                 <div className="grid w-28 grid-cols-3 gap-1">
-                  {bars.map((n, i) => <ProgressBarBase key={i} value={n} progressClassName={statColor(n)} className="h-1" />)}
+                  {bars.map(({ key, n }) => <ProgressBarBase key={key} aria-label={`${t(key)} ${n}%`} value={n} progressClassName={statColor(n)} className="h-1" />)}
                 </div>
               </Table.Cell>
             </Table.Row>

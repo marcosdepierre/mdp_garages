@@ -28,6 +28,13 @@ export function DetailView({ data, plate, onTakenOut }: { data: OpenData; plate?
   // server safety net). 3 impounded = display only (paid release phase 5); 4 retired never reaches here.
   const st = Number(v.state);
   const canTakeOut = !!garageId && (st === VehicleState.Garaged || st === VehicleState.ParkedWorld) && isValidPlate(v.plate);
+  // N14: localized reason when disabled (reuses existing err_* keys; no new locale keys).
+  const disabledReason = canTakeOut ? undefined
+    : !garageId ? 'err_invalid_garage'
+    : st === VehicleState.Out ? 'err_already_out'
+    : st === VehicleState.Impounded ? 'err_impounded'
+    : st === VehicleState.Retired ? 'err_retired'
+    : 'err_invalid_state';
 
   const takeOut = async () => {
     if (!canTakeOut || !garageId) return;
@@ -64,7 +71,7 @@ export function DetailView({ data, plate, onTakenOut }: { data: OpenData; plate?
               <span className="text-xs font-semibold uppercase tracking-wider text-tertiary">{t(key)}</span>
               <span className={cx('font-mono text-sm', n < 30 ? 'text-error-primary' : 'text-primary')}>{n}%</span>
             </div>
-            <ProgressBarBase value={n} progressClassName={statColor(n)} className="h-2 transition-[width] duration-500" />
+            <ProgressBarBase aria-label={`${t(key)} ${n}%`} value={n} progressClassName={statColor(n)} className="h-2 transition-[width] duration-500" />
           </div>
         ))}
       </div>
@@ -84,8 +91,9 @@ export function DetailView({ data, plate, onTakenOut }: { data: OpenData; plate?
       </Table>
       {/* Alerts are PRO → error shown with a FREE Badge. */}
       {error ? <div className="px-4 pt-4"><Badge type="pill-color" size="lg" color="error">{t(errorKey(error))}</Badge></div> : null}
-      <div className="mt-auto flex gap-3 p-4">
-        <Button color="primary" size="lg" className="flex-1" iconTrailing={CornerDownLeft} isLoading={busy} isDisabled={!canTakeOut} onClick={takeOut}>
+      <div className="mt-auto flex flex-col gap-2 p-4">
+        {disabledReason ? <p id="takeout-hint" className="text-sm text-tertiary">{t(disabledReason)}</p> : null}
+        <Button aria-describedby={disabledReason ? 'takeout-hint' : undefined} color="primary" size="lg" className="flex-1" iconTrailing={CornerDownLeft} isLoading={busy} isDisabled={!canTakeOut} onClick={takeOut}>
           {t('take_out')}
         </Button>
       </div>
