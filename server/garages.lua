@@ -266,7 +266,8 @@ local function adoptUnmarked(ent, plate, opts)
     if row.managed_at ~= nil then return no('vehicle_mismatch', 'already_managed') end
     if tonumber(row.in_window) ~= 1 then return no('vehicle_mismatch', 'window') end
     local bagPlate = Entity(ent).state.mdp_plate
-    if bagPlate ~= nil or Security.IsServerEntity(ent, plate) or Security.GetSpawnedEntity(plate) then
+    local trackedAs = type(Security.IsTrackedEntity) == 'function' and Security.IsTrackedEntity(ent) or nil -- any plate
+    if trackedAs ~= nil or bagPlate ~= nil or Security.IsServerEntity(ent, plate) or Security.GetSpawnedEntity(plate) then
         return no('vehicle_mismatch', 'tracked_or_marked')
     end
     if Utils.NormalizePlate(GetVehicleNumberPlateText(ent) or '') ~= plate then return no('vehicle_mismatch', 'plate_mismatch') end

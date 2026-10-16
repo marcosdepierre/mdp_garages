@@ -112,6 +112,21 @@ CREATE TABLE IF NOT EXISTS `mdp_fine_invoices` (
     ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- v5: identifiers mdp has synced at least once (imported-row adoption: only later incremental syncs are adoptable).
+CREATE TABLE IF NOT EXISTS `mdp_synced_owners` (
+  `identifier`      VARCHAR(64) NOT NULL,
+  `first_synced_at` TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`identifier`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- v5: key/value meta flags (e.g. 'initial_import_done').
+CREATE TABLE IF NOT EXISTS `mdp_meta` (
+  `k`          VARCHAR(64)  NOT NULL,
+  `v`          VARCHAR(255) NULL,
+  `updated_at` TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`k`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Schema version for idempotent future ALTERs (phase N migrations check/insert their version).
 CREATE TABLE IF NOT EXISTS `mdp_schema_version` (
   `version`     INT UNSIGNED NOT NULL,

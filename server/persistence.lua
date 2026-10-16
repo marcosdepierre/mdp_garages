@@ -90,6 +90,22 @@ local function upgradeSchema()
                  OR created_at IS NULL OR created_at < NOW() - INTERVAL 30 MINUTE)]])
         print(('[mdp_garages] schema upgrade v5: managed_at added, %d rows backfilled'):format(n or 0))
     end
+    -- v5: synced owners + meta. Created on upgrade -> seed from existing owners and mark the initial import as done,
+    -- so existing players' NEXT newly bought cars are adoptable while everything already imported is not.
+    local hadOwners = hasTable('mdp_synced_owners')
+    MySQL.query.await([[CREATE TABLE IF NOT EXISTS `mdp_synced_owners` (`identifier` VARCHAR(64) NOT NULL,
+        `first_synced_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (`identifier`))
+        ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci]])
+    MySQL.query.await([[CREATE TABLE IF NOT EXISTS `mdp_meta` (`k` VARCHAR(64) NOT NULL, `v` VARCHAR(255) NULL,
+        `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY (`k`))
+        ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci]])
+    if not hadOwners then
+        local n = MySQL.update.await('INSERT IGNORE INTO mdp_synced_owners (identifier) SELECT DISTINCT owner FROM mdp_vehicles WHERE owner IS NOT NULL') or 0
+        if n > 0 then
+            MySQL.insert.await("INSERT IGNORE INTO mdp_meta (k, v) VALUES ('initial_import_done', 'upgrade')")
+            print(('[mdp_garages] schema upgrade v5: %d synced owners seeded, initial import marked done'):format(n))
+        end
+    end
     MySQL.insert.await('INSERT IGNORE INTO mdp_schema_version (version) VALUES (1), (2), (3), (4), (5)')
 end
 
@@ -202,7 +218,11 @@ local function onStart()
     MDP.Ready = true
     pcall(MDP.Streamer.Refresh)
     print('[mdp_garages] ready')
-    CreateThread(function() MDP.Vehicles.SyncConnectedPlayers() end)
+    CreateThread(function()
+        MDP.Vehicles.SyncConnectedPlayers()
+        -- first full startup sync done: from now on, incremental syncs of KNOWN owners may create adoptable rows
+        MySQL.insert.await("INSERT IGNORE INTO mdp_meta (k, v) VALUES ('initial_import_done', 'startup')")
+    end)
 end
 
 --- R3-5: startup recovery with retries (backoff 2 s / 5 s / 10 s), then a clear error and stay not_ready.

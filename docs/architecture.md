@@ -424,7 +424,7 @@ Texts: `not_owner` 'This vehicle is not yours' / 'Este vehículo no es tuyo'; `n
 Same flow as `takeOut`: plate normalized/validated; coords finite and inside the map (L4), heading = `w` (default 0); `src` must be an online player; rate limit 3 per 10 s per src. Inside `WithLock(plate)`: re-read row → missing/REMOVED `not_owned_vehicle`; owner ≠ `Bridge.GetIdentifier(src)` `not_owner`; state not GARAGED/OUT `invalid_state`; tracked entity exists `already_out`. GARAGED → conditional `UPDATE state = OUT`; then `MDP.Props.SpawnVehicle` (server mark, TrackSpawn, managed_at, props via `RequestApply`, fuel; pcall with entity cleanup); on failure roll back to GARAGED + its `garage_id` → `spawn_failed`. Then `GiveKeys(src, veh)`, `FrameworkSync.OnSpawn`. Other errors: `invalid_plate`, `invalid_coords`, `invalid_source`, `rate_limited`, `not_ready`, `locked`. Alternative: `AddVehicle(..., garageId)` and the player takes it out normally.
 
 **First-store adoption** (`Config.AllowFirstStoreAdoption`, default true; alias `AdoptUnmarkedOnFirstStore`; the only configurable part). An unmarked entity whose plate is registered can be adopted on its owner's first `storeVehicle`. Hard-coded checks, inside the plate lock after re-reading the row:
-1. row exists, state **OUT** only (no GARAGED path; rows imported from framework tables are inserted with `managed_at` set, so they are never adoptable);
+1. row exists, state **OUT** only (no GARAGED path; imported rows: see *Imported-row adoption* below);
 2. **single use:** `managed_at IS NULL`, then `UPDATE managed_at = NOW() WHERE managed_at IS NULL` (0 rows → mark/track/bag rolled back, `vehicle_mismatch`);
 3. `created_at` within a **fixed 30 min** (NULL `created_at` → not adoptable);
 4. owner == src (`IsOwner(src, plate, false)`, keys never);
@@ -432,6 +432,13 @@ Same flow as `takeOut`: plate normalized/validated; coords finite and inside the
 6. src is the driver; rate limit **3 per 10 min** per player; audit log `src, identifier, plate, model, netId, coords`;
 7. props saved on that store: DB/stock props + only `Security.PropSnapshotFields` from the client.
 Then mark + track and the normal store flow (all Security store conditions now pass). parkWorld never adopts (`vehicle_mismatch`).
+
+**Imported-row adoption (new detections only).** A row imported from `owned_vehicles`/`player_vehicles` keeps `managed_at = NULL` (adoptable for 30 min from its insert time, same hard-coded mitigations) **only** if all hold:
+- it comes from an **incremental** player sync (`syncPlayer`), the identifier is already in **`mdp_synced_owners`** (synced before), and meta flag **`initial_import_done`** exists in **`mdp_meta`**;
+- the framework row is OUT (ESX `stored = 0`, qb/qbx `state = 0`) and still OUT after R4-1 (a live world entity exists);
+- if the framework table has a purchase/creation date column (detected once per table: `created_at`, `purchase_date`, `purchased_at`, `bought_at`, `date`), that date is within 30 min.
+Everything else is inserted with `managed_at = NOW()` (never adoptable): the first sync ever of an identifier, `mdp_migrate` bulk imports, any import before `initial_import_done`, imported GARAGED/IMPOUNDED rows. `initial_import_done` is set after the first full startup sync (`SyncConnectedPlayers`); after a successful sync the identifier is added to `mdp_synced_owners`. Adoption also rejects an entity for which `Security.IsTrackedEntity(ent)` (when present) returns any plate.
+**Upgrade (still schema v5, unreleased):** `upgradeSchema()` creates `mdp_synced_owners` / `mdp_meta`; when `mdp_synced_owners` is created it is seeded with `SELECT DISTINCT owner FROM mdp_vehicles` and, if any, `initial_import_done = 'upgrade'` is set, so existing players' next newly bought cars are adoptable and their old ones are not.
 
 **Secondary:** `exports.mdp_garages:RegisterExternalVehicle(netId, plate) -> true | false, err`. Disabled until the invoking resource is listed in `Config.TrustedResources` (default `{}`; else `untrusted_resource`); invoker logged on every call. Same core as adoption without the owner/driver checks: row created **< 60 s** ago, state OUT, `managed_at` NULL, entity not marked/tracked, plate + model match, population type 7, single use. Errors: `untrusted_resource`, `not_ready`, `invalid_plate`, `invalid_request`, `not_owned_vehicle`, `invalid_state`, `vehicle_mismatch`, `locked`.
 

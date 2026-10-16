@@ -88,7 +88,11 @@ Vehicles.OnOwnerChanged = onOwnerChanged
 --- Diff-based apply (QA R3-2/R3-3): only NEW plates are inserted; plates whose owner differs are transferred
 --- only when the mdp row is GARAGED or PARKED_WORLD (1/2). OUT (0) / IMPOUNDED (3) are logged and retried next sync.
 --- Unchanged rows cause no writes. Returns inserted, transferred.
-function Vehicles.InsertBatch(rows)
+--- opts.adoptable: incremental sync of a KNOWN owner after the initial import (see syncPlayer). Only then a NEW row
+--- that is OUT (framework stored=0 / state=0, and still OUT after R4-1) and inside the framework date window (if the
+--- framework table has a date column) is inserted with managed_at NULL (adoptable 30 min). Everything else: NOW().
+function Vehicles.InsertBatch(rows, opts)
+    local adoptableImport = type(opts) == 'table' and opts.adoptable == true
     local inserted, transferred, size = 0, 0, (Config.Migration and Config.Migration.BatchSize) or 500
     for i = 1, #rows, size do
         local chunk, plates = {}, {}
@@ -123,7 +127,11 @@ function Vehicles.InsertBatch(rows)
                     inserted = inserted + 1
                 end
             elseif not e then
-                ph[#ph + 1] = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'framework', NOW())" -- managed_at: imports are never adoptable
+                local adoptable = adoptableImport and r.state == VS.OUT
+                    and (r.fwCreatedTs == nil or (os.time() - (tonumber(r.fwCreatedTs) or 0)) <= 1800)
+                ph[#ph + 1] = adoptable and "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'framework', NULL)"
+                    or "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'framework', NOW())"
+                if adoptable then print(('[mdp_garages] %s imported for %s as new detection (adoptable 30 min)'):format(r.plate, tostring(r.owner))) end
                 -- explicit indices: props/garage_id may be nil (ipairs would stop early)
                 local vals = { r.plate, r.owner, r.model, (Config.VehicleTypes or {})[r.model] or r.vtype or 'automobile',
                                r.props, r.state, r.garage_id, r.fuel, r.engine, r.body }
@@ -151,7 +159,18 @@ function Vehicles.InsertBatch(rows)
 end
 
 --- Select framework rows (optionally for one owner), map, insert. Returns read, inserted, skipped{reason=n}.
-function Vehicles.ImportFromFramework(framework, owner)
+--- (d) framework purchase/creation date column, detected once per table (nil = none, window not enforced on it).
+local DATE_COLS = { 'created_at', 'purchase_date', 'purchased_at', 'bought_at', 'date' }
+local dateColCache = {}
+local function frameworkDateCol(tbl)
+    if dateColCache[tbl] == nil then
+        dateColCache[tbl] = false
+        for _, c in ipairs(DATE_COLS) do if columnExists(tbl, c) then dateColCache[tbl] = c break end end
+    end
+    return dateColCache[tbl] or nil
+end
+
+function Vehicles.ImportFromFramework(framework, owner, opts)
     local tbl, ownerCol, cols
     if framework == 'esx' then
         tbl, ownerCol = 'owned_vehicles', 'owner'
@@ -170,7 +189,9 @@ function Vehicles.ImportFromFramework(framework, owner)
     end
     if not tableExists(tbl) then return 0, 0, {} end
     -- identifiers are fixed literals above, never user input
-    local q = ('SELECT `%s` FROM `%s`'):format(table.concat(cols, '`, `'), tbl)
+    local dcol = frameworkDateCol(tbl)
+    local q = ('SELECT `%s`%s FROM `%s`'):format(table.concat(cols, '`, `'),
+        dcol and (', UNIX_TIMESTAMP(`%s`) AS fw_created_ts'):format(dcol) or '', tbl)
     local params = {}
     if owner then q = q .. (' WHERE `%s` = ?'):format(ownerCol); params[1] = owner end
     local okQ, rows = pcall(MySQL.query.await, q, params)
@@ -181,10 +202,11 @@ function Vehicles.ImportFromFramework(framework, owner)
     local out, skipped = {}, {}
     for _, r in ipairs(rows) do
         local m, why = Vehicles.MapFrameworkRow(framework, r)
+        if m then m.fwCreatedTs = r.fw_created_ts end
         if m and m.owner then out[#out + 1] = m else skipped[why or 'no_owner'] = (skipped[why or 'no_owner'] or 0) + 1 end
     end
     local inserted, transferred = 0, 0
-    if #out > 0 then inserted, transferred = Vehicles.InsertBatch(out) end
+    if #out > 0 then inserted, transferred = Vehicles.InsertBatch(out, opts) end
     local removed = 0
     if owner and Config.SyncRemovals then removed = Vehicles.SyncRemovals(tbl, ownerCol, owner, rows) end
     return #rows, inserted, skipped, transferred, true, removed
@@ -339,8 +361,13 @@ local function syncPlayer(src, force)
     local now = GetGameTimer()
     if not force and lastSync[ident] and now - lastSync[ident] < 60000 then return end
     lastSync[ident] = now
-    local ok, read, inserted, _, transferred, _, removed = pcall(Vehicles.ImportFromFramework, Bridge.Framework, ident)
+    -- (a)(b) adoptable only for a later incremental sync: initial import done AND this owner was already synced before
+    local initialDone = MySQL.scalar.await("SELECT 1 FROM mdp_meta WHERE k = 'initial_import_done'") ~= nil
+    local known = MySQL.scalar.await('SELECT 1 FROM mdp_synced_owners WHERE identifier = ?', { ident }) ~= nil
+    local ok, read, inserted, _, transferred, okQ, removed = pcall(Vehicles.ImportFromFramework, Bridge.Framework, ident,
+        { adoptable = initialDone and known })
     if not ok then print('^1[mdp_garages] sync failed for ' .. ident .. ': ' .. tostring(read) .. '^0') return end
+    if okQ ~= false and not known then MySQL.insert.await('INSERT IGNORE INTO mdp_synced_owners (identifier) VALUES (?)', { ident }) end
     if inserted > 0 or (transferred or 0) > 0 or (removed or 0) > 0 then
         print(('[mdp_garages] synced %s: %d read, %d new, %d transferred, %d removed'):format(ident, read, inserted, transferred or 0, removed or 0))
     end
