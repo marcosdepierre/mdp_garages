@@ -59,6 +59,59 @@ function Security.OnSuspicious(src, reason, data) end
 ---@param event string
 ---@param reason string
 ---@param extra table|nil
+---------------------------------------------------------------------------
+-- Log estructurado: Security.Log(level, category, msg, fields)
+-- level: 'AUDIT' (siempre se imprime, no depende de debug) | 'WARN' | 'ERROR' (siempre) | 'INFO' | 'DEBUG' (solo con debug).
+-- Los valores se sanean (sin caracteres de control ni códigos ^n de color) y se recortan. Hook: Security.OnLog(entry).
+---------------------------------------------------------------------------
+local LOG_LEVELS = { AUDIT = true, ERROR = true, WARN = true, INFO = true, DEBUG = true }
+local LOG_MAX_VAL, LOG_MAX_MSG, LOG_MAX_FIELDS = 128, 256, 24
+
+local function logClean(v, max)
+    local t = type(v)
+    if t == 'number' or t == 'boolean' or t == 'nil' then return v end
+    local str = tostring(v):gsub('[%c]', ' '):gsub('%^%d', ''):gsub('[<>]', '')
+    if #str > max then str = str:sub(1, max - 3) .. '...' end
+    return str
+end
+
+--- Hook sobrescribible (webhooks, ox_lib logger…). Recibe { level, category, msg, fields, time }.
+--- Debe ser rápido; los errores se capturan.
+function Security.OnLog(entry) end
+
+---@param level string
+---@param category string
+---@param msg string
+---@param fields table|nil
+function Security.Log(level, category, msg, fields)
+    level = type(level) == 'string' and level:upper() or 'INFO'
+    if not LOG_LEVELS[level] then level = 'INFO' end
+    category = logClean(category or 'general', 32)
+    msg = logClean(msg or '', LOG_MAX_MSG)
+    local clean, parts, n = {}, {}, 0
+    if type(fields) == 'table' then
+        local keys = {}
+        for k in pairs(fields) do if type(k) == 'string' or type(k) == 'number' then keys[#keys + 1] = tostring(k) end end
+        table.sort(keys)
+        for _, k in ipairs(keys) do
+            n = n + 1
+            if n > LOG_MAX_FIELDS then clean._truncated = true break end
+            local v = fields[k]; if v == nil then v = fields[tonumber(k)] end
+            if type(v) == 'table' then v = '[table]' end
+            local ck = logClean(k, 32)
+            clean[ck] = logClean(v, LOG_MAX_VAL)
+            parts[#parts + 1] = ('%s=%s'):format(ck, tostring(clean[ck]))
+        end
+    end
+    local always = level == 'AUDIT' or level == 'ERROR' or level == 'WARN'
+    if always or Security.Config.debug then
+        print(('[%s][%s][%s] %s%s'):format(Security.Config.resourceName, level, category, msg,
+            #parts > 0 and (' | ' .. table.concat(parts, ' ')) or ''))
+    end
+    local ok, err = pcall(Security.OnLog, { level = level, category = category, msg = msg, fields = clean, time = os.time() })
+    if not ok then print(('[%s][SECURITY] OnLog falló: %s'):format(Security.Config.resourceName, tostring(err))) end
+end
+
 function Security.LogReject(src, event, reason, extra)
     rejectCount[src] = (rejectCount[src] or 0) + 1
     local ident = (Bridge and Bridge.GetIdentifier) and Bridge.GetIdentifier(src) or 'unknown'

@@ -193,3 +193,9 @@ La matrícula sale de la marca o del tracking (`opts.plate` como candidata, que 
 - [ ] NUI: sin `innerHTML`; textos saneados; números clamped.
 - [ ] Rechazos logueados; nada de `print` con datos sensibles.
 - [ ] Limpieza en `playerDropped` si se guarda estado por jugador.
+
+
+## Registro estructurado y auditoría (`Security.Log`)
+`Security.Log(level, category, msg, fields)`. `AUDIT`, `ERROR` y `WARN` se imprimen siempre (no dependen de `debug`); `INFO` y `DEBUG` solo con `debug`. Los valores se sanean (sin caracteres de control, `^n` ni `<>`) y se recortan (valor 128, mensaje 256, 24 campos). El hook `Security.OnLog(entry)` es sobrescribible para webhooks y sus errores se capturan.
+**Obligatorio** `AUDIT` para: transferencias (`transfer`), adopción (`adopt`), `/mdp_regularize` (`regularize`), exports de concesionario (`external`) e incautaciones (`impound`). Nunca registrar secretos ni tokens.
+- [ ] Toda acción que cambie dueño, marca o estado fuera del flujo normal emite `Security.Log('AUDIT', …)`.

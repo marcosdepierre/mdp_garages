@@ -443,3 +443,47 @@ Bien resuelto:
 ## Veredicto
 No quedan bloqueantes Críticos ni Altos. N1, N10, P1-OWN-H1/H2 y AD-2 a AD-5 están cerrados.
 Antes de cerrar la fase 1 hay que arreglar **TR-1** (UPDATE condicionados al dueño; es pequeño) y **TR-2** (revocar las llaves a todos los jugadores online). Son Medios, pero afectan directamente a la regla «solo vehículos propios». Con esos dos aplicados, la fase 1 puede cerrarse en el plano de seguridad; AD-1 y TR-3 a TR-5 pueden ir a la fase 2.
+
+---
+
+# Re-revisión 7 — `2b60c36`, `bb6397a`, `ad7f0e5` (16/10/2026, 23:20 UTC+1)
+
+## Nuevo en security.lua: `Security.Log(level, category, msg, fields)`
+- Niveles: `AUDIT`, `ERROR` y `WARN` se imprimen **siempre**, sin depender de `debug`. `INFO` y `DEBUG` solo se imprimen con `debug`. Un nivel desconocido se trata como `INFO`.
+- Saneado: sin caracteres de control, sin códigos de color `^n` y sin `<`/`>`. Valores recortados a 128 caracteres, mensaje a 256 y como máximo 24 campos (`_truncated`). Las tablas aparecen como `[table]`.
+- Hook `Security.OnLog(entry)`, con `{ level, category, msg, fields, time }`, sobrescribible para webhooks. Se llama siempre (también para `DEBUG`), y sus errores se capturan.
+- **Backend (TR-5):** sustituir el `print` de `onOwnerChanged` por `Security.Log('AUDIT', 'transfer', 'owner changed', { plate = plate, old = oldOwner, new = newOwner, via = 'sync'|'add'|'lock' })`. Lo mismo para `adopt`, `regularize` y `external`.
+
+## Verificación de la re-revisión 6
+| ID | Estado | Nota |
+|---|---|---|
+| TR-1 | **Cerrado** | Todos los UPDATE de estado (takeOut ×2, store, park, SpawnOwnedVehicle) llevan `AND owner = ?`; 0 filas → `not_owner`; el UPDATE va antes del spawn. takeOut revalida `IsOwner` dentro del lock. **`WithLock` no es reentrante** (un segundo `Lock` sobre la misma matrícula devuelve `false` → `'locked'`). La reutilización se hace bien: `ApplyTransfer(..., locked=true)` solo desde `lockedOwnVehicle`, que ya tiene el lock, así que no hay deadlock. Las llamadas sin lock (sync, AddVehicle) usan `WithLock(plate, 0, …)`: si la matrícula está ocupada, la transferencia no se aplica (falla cerrado; la sync la reintenta y el control del framework dentro del lock la cubre). Ver R7-3. |
+| TR-2 | **Cerrado** (para jugadores online) | `RemoveKeys` a todos los online salvo el comprador, más el DELETE de `mdp_vehicle_keys`. Las llaves offline persistentes dependen del recurso de llaves (documentado). |
+| TR-3 | Parcial (aceptado) | Se registra el error; la transacción queda para la fase 2. |
+| TR-4 | **Cerrado** | `LIMIT 2`; con más de una fila → `nil, 'ambiguous'`, sin transferencia; el dueño se valida como string no vacío. Ver R7-2. |
+| TR-5 | **Cerrado** | Guarda `old == new` y `newOwner` válido. AUDIT: ya existe `Security.Log`. |
+| R2-M1 | OK | Con la fila GARAGED se ignoran los clones sin marca: el coche real sale marcado y el clon nunca puede guardarse (no tiene marca). Evita bloquear al dueño. |
+| R2-M3 | OK | Parámetros enlazados (`?`), sin concatenación; la matrícula ya está validada (`[A-Z0-9 ]`, sin comodines); el padding solo se aplica si tiene menos de 8. Con colaciones PAD SPACE las dos condiciones encuentran la misma fila (no hay duplicado falso). |
+
+## first_seen_at / fw_date_at (`bb6397a` + `ad7f0e5`)
+- **Lo escribe solo el servidor y nunca se actualiza:** solo aparece en el `INSERT IGNORE` de `InsertBatch` (`NOW()`, y `FROM_UNIXTIME(%d)` con un entero, sin inyección). Ningún UPDATE lo toca. ✓
+- **Nunca en la importación inicial, la primera sincronización ni `mdp_migrate`:** esas rutas insertan `managed_at = NOW(), first_seen_at = NULL`. Las filas existentes al migrar a v6 quedan NULL. ✓
+- **NULL = no adoptable:** `first_seen_at IS NOT NULL` obligatorio. ✓
+- **Sospecha del bug de `bb6397a`: confirmado.** La ventana empezaba en `GREATEST(first_seen_at, fw_date_at)`, el más tardío. Un coche comprado 29 min antes de la detección seguía siendo adoptable hasta casi una hora después de la compra.
+- **Arreglado en `ad7f0e5`:** `TIMESTAMPDIFF(SECOND, LEAST(first_seen_at, COALESCE(fw_date_at, first_seen_at)), NOW()) <= windowSec`, y cada fecha presente con `>= -300` (como máximo 5 min en el futuro). Es la regla correcta (expira en min + ventana). ✓ No reabre AD-2.
+- **RegisterExternalVehicle (60 s):** mismo cálculo con un tope de 60 s desde la fecha más temprana. Efecto colateral (funcional, no de seguridad): una fila del framework solo se detecta en la sincronización del dueño (al cargar, o cada 60 s al abrir el garaje), así que el concesionario que llame al export justo tras la compra suele recibir `not_owned_vehicle`. Falla cerrado. Recomendación: que los concesionarios usen `AddVehicle` antes (filas `mdp`, ventana por `created_at`).
+- **Vector de borrar y reinsertar:** **no reabre la ventana.** Si el framework borra la fila → `SyncRemovals` la pasa a REMOVED (soft delete). Al reinsertarla → restauración por UPDATE que **no toca** `first_seen_at` (conserva la fecha original, ya caducada). Con `SyncRemovals` desactivado la fila mdp sigue ahí (`e` existe) y no hay INSERT. Solo un borrado **manual** (DELETE en BD por un admin) generaría un `first_seen_at` nuevo (Info; documentar que no se borren filas de `mdp_vehicles` a mano).
+
+## Otras comprobaciones pedidas
+- **Tasa de depósito («quien recoge paga»):** la liberación de pago no existe todavía (takeOut devuelve `impounded`; fase 5). Requisito para la fase 5: `releaseImpound` debe exigir **dueño** (`IsOwner(src, plate, false)`, más el control del dueño del framework dentro del lock) antes de cobrar. Pagar la tasa nunca puede dar derecho a sacar el coche de otro. La tasa se lee de `mdp_impound`, nunca del cliente (ya está así en architecture.md).
+- **Multas que se quedan con el infractor:** `unpaidFinesBlocked(row.owner)` y `/mdp_regularize` solo cuentan las multas del dueño **actual**. El comprador no queda bloqueado por las del vendedor ✓. El vendedor no las esquiva: siguen ligadas a su identificador y le bloquean sus demás vehículos. Vender a una cuenta alternativa libera ese coche concreto, pero la deuda sigue en el vendedor (es la política de diseño; Info: auditar las transferencias con `Security.Log`).
+
+## Hallazgos
+**R7-1 (Alto, coincide con QC `3d6077a`) — takeOut y SpawnOwnedVehicle no comparan con el dueño del framework.** `FrameworkOwner` solo se llama en `lockedOwnVehicle` (store/park, `garages.lua:374`). Si el framework cambia de dueño y la sincronización todavía no ha corrido (caché de 60 s, vendedor sin reconectar), el vendedor puede sacar del garaje el coche ya vendido. *Arreglo:* dentro del lock de takeOut y SpawnOwnedVehicle, con `SyncFrameworkTables`, `fwOwner = FrameworkOwner(plate)`; si no coincide → `ApplyTransfer(plate, row.owner, fwOwner, true)` y `not_owner`. Si devuelve `'ambiguous'` → rechazar (ver R7-2).
+
+**R7-2 (Bajo) — Ambigüedad = control omitido.** Con `FrameworkOwner → nil, 'ambiguous'` (o una fila no encontrada por espacios iniciales), `lockedOwnVehicle` continúa con el dueño de mdp. *Arreglo:* con `'ambiguous'` → falla cerrado (`not_owner`, y registrarlo con `Security.Log('WARN', 'ownership', …)`).
+
+**R7-3 (Bajo) — `AddVehicle` con la matrícula bloqueada** devuelve `transfer_failed` (indistinguible de un fallo real). *Arreglo:* propagar `'locked'` → `busy` para que el concesionario reintente.
+
+## Veredicto
+No quedan Críticos. Hay **un Alto: R7-1** (control del dueño del framework en takeOut/SpawnOwnedVehicle, el mismo que reporta QC en `3d6077a`). **La fase 1 NO está cerrada en el plano de seguridad hasta aplicar R7-1.** Es un arreglo pequeño que reutiliza el patrón de `lockedOwnVehicle`. Con R7-1 aplicado y verificado, la fase 1 queda cerrada; R7-2, R7-3, AD-1 y TR-3 pueden ir a la fase 2.
